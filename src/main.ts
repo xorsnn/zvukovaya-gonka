@@ -1,5 +1,5 @@
 import "./style.css";
-import { AudioEngine, USE_PHONETIC } from "./audio/AudioEngine";
+import { AudioEngine, USE_PHONETIC, type AudioFrame } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
 import { GameView } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
@@ -238,6 +238,45 @@ recalBtn.addEventListener("click", () => {
   showScreen("check");
 });
 
+// ---------- debug overlay (add ?debug=1 to the URL) ----------
+// A hidden tuning aid: shows the live phonetic features + matcher state so we can
+// see WHY a sound does or doesn't count as a vowel. Off entirely unless the URL
+// carries ?debug, so it never touches normal play. Works on the mic-check screen
+// (read the features for «ооо» vs «шшш») and during the game.
+const DEBUG = new URLSearchParams(location.search).has("debug");
+const dbgEl = DEBUG ? document.createElement("pre") : null;
+if (dbgEl) {
+  dbgEl.style.cssText =
+    "position:fixed;top:6px;left:6px;z-index:9;margin:0;padding:8px 10px;" +
+    "font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;" +
+    "color:#27e07a;background:rgba(0,0,0,0.72);border-radius:8px;" +
+    "pointer-events:none;letter-spacing:0.3px;";
+  document.body.appendChild(dbgEl);
+}
+
+function dbgBar(x: number, n = 10): string {
+  const k = Math.max(0, Math.min(n, Math.round(x * n)));
+  return "█".repeat(k) + "·".repeat(n - k);
+}
+
+function renderDebug(frame: AudioFrame): void {
+  if (!dbgEl) return;
+  const m = game.debugMatch;
+  const effHold = calibHoldThreshold * (1 - assist * 0.7);
+  const effMin = game.getScene().pattern.sustain.minMs * (1 - assist * 0.6);
+  const f = (x: number, d = 2) => x.toFixed(d);
+  dbgEl.textContent =
+    `vowelLike ${f(frame.vowelLikeness)} ${dbgBar(frame.vowelLikeness)}\n` +
+    ` flatness ${f(frame.flatness)} ${dbgBar(frame.flatness)}\n` +
+    `      zcr ${f(frame.zcr)} ${dbgBar(frame.zcr)}\n` +
+    `  lowBand ${f(frame.lowBandRatio)} ${dbgBar(frame.lowBandRatio)}\n` +
+    ` centroid ${Math.round(frame.centroid)} Hz\n` +
+    `    level ${f(frame.level)}  ${frame.voiced ? "●voiced" : "·quiet"}\n` +
+    `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
+    `  thr ${f(effHold)}  assist ${f(assist, 1)}\n` +
+    `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;
+}
+
 // ---------- master loop ----------
 let last = performance.now();
 function loop(now: number): void {
@@ -266,6 +305,8 @@ function loop(now: number): void {
     game.step(frame, now, dt);
     updateWordHighlight(frame);
   }
+
+  if (dbgEl && (current === "check" || current === "game")) renderDebug(frame);
 
   requestAnimationFrame(loop);
 }
