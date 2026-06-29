@@ -7,21 +7,49 @@ pounce and a happy celebration plays. The child's own voice drives the fun.
 
 UI and content are in Russian.
 
-## The core rule: no speech recognition
+## The core rule: no word recognition, but phonetic-feature sensing
 
-There is **no ASR / phoneme recognition / word matching** anywhere. That is
-unreliable for young kids — and especially for kids with speech delay — and
-turns the game into a punishment machine.
+There is still **no ASR / word matching / phoneme *decoding*** anywhere, and no
+ML. We never try to tell *which* word or vowel was said — that is unreliable for
+young kids, especially kids with speech delay, and turns the game into a
+punishment machine.
 
-Everything is driven by the microphone **loudness envelope** (Web Audio API
-`AnalyserNode` → RMS amplitude in real time):
+What we *do* read, on top of the loudness envelope, is a handful of cheap
+**acoustic features** (spectral flatness, centroid, low-band ratio,
+zero-crossing rate) blended into one 0..1 `vowelLikeness`. That lets the cat
+tell a sustained «о-о-о» from a flat shriek **without** asking which sound it
+was. This is the first rung of a planned *phonetic discrimination ladder*
+(issue #1): the MVP drove purely off RMS loudness, so any noise won — a toddler
+found the exploit (scream, or shout-and-stop). The feature layer closes that
+while keeping the no-recognition promise.
 
-- **Any** voiced sound above the noise floor makes the cat run. Sustained sound
-  keeps it chasing. This rewards _vocalizing at all_ — the actual therapeutic
-  goal (sustained phonation = breath support).
-- The **pounce** triggers on a simple acoustic event once the cat is close: a
-  fresh burst (the final "т") **or** simply running out of breath and stopping.
-  We never verify it was really a /т/. Be generous — reward the attempt.
+Everything is driven from the Web Audio API `AnalyserNode`
+(`getFloatTimeDomainData` → RMS + ZCR; `getFloatFrequencyData` → the spectral
+features):
+
+- **Any** voiced sound above the noise floor still makes the cat run; a clearer,
+  steadier vowel just makes it run **faster** (graded by `vowelLikeness`, never
+  punished). This rewards _vocalizing at all_ — the therapeutic goal — while
+  nudging toward the target sound.
+- The **pounce** arms only after a real sustained vowel-like **hold**, and the
+  catch needs a genuine **stop** (a near-silence gap) — which a continuous
+  scream never produces and a single short shout never reaches. Simply running
+  out of breath and stopping is the generous, expected finale.
+
+### Leniency is mandatory (the whole reason ASR was banned)
+
+These are invariants, not nice-to-haves:
+
+1. Genuine voicing **never** yields zero drive — the cat always moves at least
+   `MIN_FLOOR`.
+2. **No** negative feedback for a "wrong" sound: no buzzer, no red, no
+   stop-and-scold. The only signal is cat speed.
+3. A `USE_PHONETIC` kill-switch (`src/audio/AudioEngine.ts`) reverts to the exact
+   shipped loudness-only engine in one flag.
+4. A **строго ↔ легче** (strict ↔ easy) `assist` slider relaxes every threshold
+   continuously — at the easy end it is as forgiving as the old loudness-only
+   feel, for a noisy room or a detector miss. It relaxes the gate; it never
+   silently bypasses it.
 
 There is no timer, no score, no fail state. A child can never lose.
 
@@ -42,60 +70,97 @@ no external assets — sounds are synthesized, art is emoji + canvas).
 
 ```
 Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFrame
-                                                              { level, voiced,
-                                                                onset, release }
+        │  getFloatTimeDomainData → RMS, ZCR                  { level, voiced,
+        └─ getFloatFrequencyData  → flatness, centroid,         onset, release,
+                                    low-band, vowelLikeness     vowelLikeness, … }
                                                                     │
         ┌───────────────────────────────────────────────────────────┤
         ▼                                                             ▼
-   MeterView (mic check)                                      GameView (the chase)
-   pulsing "I hear you" circle                                cat chases mouse,
-                                                              pounce, celebration
+   MeterView (mic check)                                  PatternMatcher → GameView
+   pulsing "I hear you" circle                            hold→gap→stop shape, graded
+   + samples the vowel baseline                           chase speed, pounce, party
 ```
 
-- **`src/audio/AudioEngine.ts`** — mic capture and the loudness envelope. RMS
-  with fast-attack/slow-release smoothing; automatic noise-floor calibration
-  that keeps adapting to room noise; a self-scaling `level` so even a quiet
-  child fills the meter and can "win"; voiced detection with hysteresis; onset /
-  release edge detection used as the generous "burst". Browser-side AGC, noise
-  suppression and echo cancellation are all **disabled** — AGC would flatten the
-  loudness dynamics the whole game depends on, and the others can gate a child's
-  quiet, breathy sounds.
+- **`src/audio/PhoneticFeatures.ts`** — pure, unit-tested DSP: zero-crossing
+  rate, spectral flatness / centroid / low-band ratio, and the `vowelLikeness`
+  blend. No state, no Web Audio — just `Float32Array` in, number out.
+- **`src/audio/AudioEngine.ts`** — mic capture, the loudness envelope, **and**
+  the spectral feature layer (behind `USE_PHONETIC`). RMS with
+  fast-attack/slow-release smoothing; automatic noise-floor calibration; a
+  self-scaling `level`; voiced detection with hysteresis; onset/release edges;
+  and per-frame `vowelLikeness`, scored against an optional per-child baseline.
+  Browser-side AGC, noise suppression and echo cancellation are all **disabled**
+  — AGC would flatten the loudness dynamics, and the others gate quiet breathy
+  sounds and would corrupt the spectrum. Accepts an injectable analyser so the
+  whole chain is testable without a mic.
+- **`src/game/PatternMatcher.ts`** — the hold → gap → stop state machine. Grades
+  chase speed (`driveQuality`), decides when a vowel hold is long enough to arm
+  the pounce, and fires the catch on a genuine stop. Two thresholds (a lenient
+  "counts as trying" gate + the graded speed) and an `assist` knob keep it
+  forgiving. Pure and deterministic.
 - **`src/game/GameView.ts`** — the canvas chase. Progress accumulates while
-  voiced (and never decays on a pause, so breathing is fine). Once the cat is
-  close (`POUNCE_READY`), any onset or release finishes the catch. The cat and
-  mouse become friends at the end (hearts, not a kill).
+  voiced (and never decays on a pause). With the matcher, speed = `MIN_FLOOR +
+  (1−MIN_FLOOR)·driveQuality` and the catch is gated on a real hold + stop; with
+  the matcher off it is the exact pre-#1 loudness path (`stepPlay(match=null)`).
+  The cat and mouse become friends at the end (hearts, not a kill).
 - **`src/game/MeterView.ts`** — the "I can hear you" indicator for the mic-check
-  screen, so a caregiver can confirm the mic before involving the child.
+  screen, so a caregiver can confirm the mic before involving the child. The
+  mic-check doubles as the vowel-baseline calibration window.
 - **`src/game/sfx.ts`** — synthesized celebration sounds + best-effort Russian
   TTS to model the target word. Sound only plays _after_ the pounce, never
   during the chase (with echo cancellation off, speaker audio would otherwise
   feed back into the chase).
 - **`src/game/words.ts` / `types.ts`** — the content model. A `WordScene` is the
-  unit of content; the chase mechanic is generic, so adding a `[hold]+[stop]`
-  word (дом, кит, …) is just adding data.
+  unit of content and now carries an `AcousticPattern` (which ladder rung, how
+  long to hold, the required stop gap). The chase mechanic is generic, so adding
+  a `[hold]+[stop]` word (дом, кит, …) is just adding data.
 - **`src/main.ts`** — screen flow (start → mic check → game), the single master
-  render loop, mic-permission handling and the graceful denied/error fallback.
+  render loop, mic-permission handling, the graceful denied/error fallback,
+  the per-round matcher wiring, the assist slider, and the vowel-baseline
+  calibration sampled on the mic-check screen.
 
 ## Caregiver affordances
 
-Small, kid-ignorable controls: **🔊 Послушать** (hear the word modelled by TTS)
-and **⚙ микрофон** (re-run the mic check / recalibration).
+Small, kid-ignorable controls at the bottom of the game screen:
+**🔊 Послушать** (hear the word modelled by TTS), **⚙ микрофон** (re-run the mic
+check / recalibration), and a **строго ↔ легче** (strict ↔ easy) slider that
+relaxes the phonetic grading for a noisy room.
 
-## Extending — the word bank & difficulty ladder
+## Tests
 
-`src/game/words.ts` already contains extra scenes (дом, кит) ready to surface.
-The design space from the brief:
+```bash
+npm test           # vitest: pure DSP, the PatternMatcher state machine,
+                   # an AudioEngine→matcher integration via an injected analyser,
+                   # plus the AC#4 (graded) and AC#5 (kill-switch identity) guards
+```
+
+The DSP and the state machine are pure, and `AudioEngine` accepts an injected
+fake analyser, so the suite runs in plain Node — no jsdom, no microphone.
+
+## Extending — the word bank & phonetic ladder
+
+`src/game/words.ts` already contains extra scenes (дом, кит) ready to surface;
+all three currently sit on **Rung 1** (vowel-ish vs noise). The design space:
 
 - More `[sustainable vowel/sonorant] + [stop]` words: дом, мяч, кит, гусь.
 - Onomatopoeia (gold here): мууу, ааам, бууух — these would add a new
   `SceneType` beyond `"chase"`.
-- A difficulty ladder: "any noise → thing happens" → "hold longer" → two-part
-  words. The chase tuning constants in `GameView.ts` (`CHASE_RATE`,
-  `POUNCE_READY`, `MIN_VOICED_DRIVE`) are the knobs.
+- The **phonetic discrimination ladder** (issue #1): Rung 0 = hold→gap→stop
+  shape · Rung 1 = vowel vs noise (built) · Rung 2 = which vowel (formants) ·
+  Rung 3 = consonant class · Rung 4 = syllable. Each new rung is a finer
+  `AcousticPattern` + (for ≥2) new features in `PhoneticFeatures.ts`.
+- Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` in `GameView.ts`, the
+  `VOWEL_WEIGHTS` blend in `PhoneticFeatures.ts`, and the per-scene
+  `AcousticPattern` (`minMs`, `requireGapMs`) in `words.ts`.
 
 ## Tuning notes
 
-If the cat reacts too eagerly or too sluggishly in a particular room, the
-relevant constants are the noise-floor multipliers in `AudioEngine.ts` and the
-chase constants at the top of `GameView.ts`. The mechanic lives or dies on how
-immediately the cat reacts to the child's voice.
+If the cat reacts too eagerly or too sluggishly in a particular room, reach for
+the **строго ↔ легче** slider first (it relaxes every phonetic threshold at
+once). Beyond that, the relevant constants are the noise-floor multipliers in
+`AudioEngine.ts`, the chase constants at the top of `GameView.ts`
+(`MIN_FLOOR`, `CHASE_RATE`, `POUNCE_READY`), and the `VOWEL_WEIGHTS` blend in
+`PhoneticFeatures.ts`. If the spectral layer ever misbehaves on real hardware,
+`USE_PHONETIC = false` in `AudioEngine.ts` reverts to the shipped loudness-only
+engine instantly. The mechanic lives or dies on how immediately the cat reacts
+to the child's voice.

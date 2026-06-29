@@ -1,5 +1,6 @@
 import type { AudioFrame } from "../audio/AudioEngine";
 import type { WordScene } from "./types";
+import type { MatchState, PatternMatcher } from "./PatternMatcher";
 import { playCelebration, playPop } from "./sfx";
 
 type GameState = "play" | "pounce" | "celebrate";
@@ -37,7 +38,61 @@ const CONFETTI_COLORS = [
 const PRECHASE_CAP = 0.9; // cat closes most of the gap on sustain...
 const POUNCE_READY = 0.8; // ...and once this close, any burst/stop catches.
 const CHASE_RATE = 1.0; // progress per second at full loudness
-const MIN_VOICED_DRIVE = 0.25; // any voicing moves the cat at least this much
+const MIN_VOICED_DRIVE = 0.25; // (loudness path) any voicing moves the cat ≥ this
+/** (phonetic path) the cat ALWAYS runs at least this fast on genuine voicing —
+ * leniency invariant #1. A clearer vowel adds the rest up to full speed. */
+export const MIN_FLOOR = 0.15;
+/** (phonetic path) once the vowel hold is satisfied, how fast the cat closes the
+ * last of the gap so the pounce always leaps from right behind the mouse. */
+const HOLD_CLOSE_RATE = 3.0;
+
+/**
+ * One step of the "play" state, factored out as a pure function so the drive +
+ * pounce-gating logic is unit-testable without a canvas (node env).
+ *
+ * - With a `match` (phonetic path): speed = `MIN_FLOOR + (1-MIN_FLOOR)*driveQuality`.
+ *   The catch gate is `match.caught` (a real vowel hold + a genuine stop) — NOT
+ *   chase proximity, because a 600 ms hold may not have pushed `progress` to
+ *   `POUNCE_READY` yet, and `caught` is a one-shot edge. Instead, once the hold
+ *   is satisfied the cat surges to `PRECHASE_CAP`, so by the time the stop fires
+ *   it is already poised behind the mouse. This is what makes AC#3 reliable.
+ * - With `match === null` (USE_PHONETIC off, or a scene with no matcher): the
+ *   EXACT pre-#1 behavior — speed = `max(MIN_VOICED_DRIVE, level)`, catch on any
+ *   `onset || release` once `progress >= POUNCE_READY`. This identity is what
+ *   makes the kill-switch a true rollback (AC#5).
+ */
+export interface PlayStep {
+  progress: number;
+  pounce: boolean;
+}
+
+export function stepPlay(
+  prev: number,
+  frame: AudioFrame,
+  dts: number,
+  match: MatchState | null,
+  inputEnabled: boolean,
+): PlayStep {
+  let progress = prev;
+  if (inputEnabled && frame.voiced) {
+    const drive = match
+      ? MIN_FLOOR + (1 - MIN_FLOOR) * match.driveQuality
+      : Math.max(MIN_VOICED_DRIVE, frame.level);
+    progress = Math.min(PRECHASE_CAP, prev + drive * CHASE_RATE * dts);
+  }
+  // Hold satisfied → cat closes in and poises (continues even through the final
+  // silent gap, so the pounce leaps from close regardless of how loud she was).
+  if (match && inputEnabled && match.holdSatisfied) {
+    progress = Math.max(progress, Math.min(PRECHASE_CAP, prev + HOLD_CLOSE_RATE * dts));
+  }
+  let pounce = false;
+  if (inputEnabled) {
+    pounce = match
+      ? match.caught
+      : progress >= POUNCE_READY && (frame.onset || frame.release);
+  }
+  return { progress, pounce };
+}
 
 /**
  * GameView renders one chase scene to a canvas and drives it entirely from the
@@ -61,6 +116,11 @@ export class GameView {
 
   private ctx: CanvasRenderingContext2D;
   private scene: WordScene;
+
+  /** Phonetic shape matcher for the active round; null = loudness-only path. */
+  private matcher: PatternMatcher | null = null;
+  /** Latest matcher verdict (for the prompt highlight); null on loudness path. */
+  private lastMatch: MatchState | null = null;
 
   private progress = 0; // 0..1 chase progress
   private displayProgress = 0; // smoothed for rendering
@@ -93,13 +153,27 @@ export class GameView {
     return this.scene;
   }
 
+  /**
+   * Install (or clear) the phonetic matcher for this round. Pass `null` to use
+   * the loudness-only path (USE_PHONETIC off, or a scene without a matcher).
+   */
+  setMatcher(matcher: PatternMatcher | null): void {
+    this.matcher = matcher;
+    this.lastMatch = null;
+  }
+
   /** Smoothed chase progress 0..1, for host UI (prompt highlight). */
   get chaseProgress(): number {
     return this.displayProgress;
   }
 
-  /** True once the cat is close enough that any burst will trigger the catch. */
+  /**
+   * True once the catch is imminent, for the "say Т / now stop" hint. On the
+   * phonetic path this means the vowel hold is satisfied (a stop will now
+   * catch); on the loudness path it falls back to chase proximity.
+   */
   get nearPounce(): boolean {
+    if (this.matcher) return this.lastMatch?.holdSatisfied ?? false;
     return this.displayProgress >= POUNCE_READY - 0.08;
   }
 
@@ -112,6 +186,8 @@ export class GameView {
     this.celebrateElapsed = 0;
     this.confetti = [];
     this.hearts = [];
+    this.matcher?.reset();
+    this.lastMatch = null;
   }
 
   resize(): void {
@@ -139,27 +215,24 @@ export class GameView {
   // ---- state updates ----
 
   private updatePlay(frame: AudioFrame, dts: number): void {
-    const driving = this.inputEnabled && frame.voiced;
-    if (driving) {
-      const drive = Math.max(MIN_VOICED_DRIVE, frame.level);
-      this.progress = Math.min(
-        PRECHASE_CAP,
-        this.progress + drive * CHASE_RATE * dts,
-      );
-      this.moving = Math.min(1, this.moving + dts * 6);
-    } else {
-      this.moving = Math.max(0, this.moving - dts * 4);
-    }
+    // Advance the matcher only while we're actually listening, so the modelled
+    // word (TTS) can't accumulate a hold. Null match → loudness-only path.
+    const match =
+      this.matcher && this.inputEnabled
+        ? this.matcher.update(frame, dts * 1000)
+        : null;
+    this.lastMatch = match;
 
-    // Pounce: once the cat is close, ANY acoustic event finishes the catch —
-    // a fresh burst (the "Т"), or simply running out of breath and stopping.
-    if (
-      this.inputEnabled &&
-      this.progress >= POUNCE_READY &&
-      (frame.onset || frame.release)
-    ) {
-      this.startPounce();
-    }
+    const res = stepPlay(this.progress, frame, dts, match, this.inputEnabled);
+    this.progress = res.progress;
+
+    // Cosmetic running animation tracks whether the child is driving the cat.
+    const driving = this.inputEnabled && frame.voiced;
+    this.moving = driving
+      ? Math.min(1, this.moving + dts * 6)
+      : Math.max(0, this.moving - dts * 4);
+
+    if (res.pounce) this.startPounce();
   }
 
   private startPounce(): void {

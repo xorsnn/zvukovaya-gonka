@@ -1,9 +1,17 @@
 /**
  * AudioEngine — the heart of the game.
  *
- * DESIGN RULE (non-negotiable): there is NO speech recognition here. We never
- * try to tell which phoneme or word was said. We only read the microphone
- * LOUDNESS ENVELOPE (RMS amplitude) in real time. Any voiced sound is rewarded.
+ * DESIGN RULE (updated 2026-06-29, issue #1): there is still NO speech
+ * recognition here — we never decode which word or phoneme was said. What we DO
+ * now read, in addition to the loudness envelope, is a handful of cheap
+ * *acoustic features* (spectral flatness, centroid, low-band ratio,
+ * zero-crossing rate) blended into a single 0..1 `vowelLikeness`. That lets the
+ * game tell a sustained «о-о-о» from a flat shriek without ever asking which
+ * vowel it was. Any voiced sound is still rewarded; a clearer vowel is rewarded
+ * *more* (graded, never punished — see {@link PatternMatcher}).
+ *
+ * The whole spectral layer is additive and sits behind {@link USE_PHONETIC}.
+ * Flip that off and `sample()` returns exactly the pre-#1 loudness-only frame.
  *
  * What we expose every frame (see {@link AudioFrame}):
  *   - level:   self-scaling 0..1 loudness for meters & chase speed. Auto-adapts
@@ -11,11 +19,43 @@
  *   - voiced:  is there sound above the noise floor right now (with hysteresis).
  *   - onset:   a fresh quiet→loud transition this frame (used as the "burst").
  *   - release: a loud→quiet transition this frame.
+ *   - flatness/centroid/lowBandRatio/zcr/vowelLikeness: the phonetic layer.
  *
  * Calibration is automatic: we measure the ambient noise floor at startup and
  * keep adapting it slowly while the room is quiet, so it survives a normal noisy
  * room without any knobs.
  */
+
+import {
+  spectralFlatness,
+  spectralCentroid,
+  lowBandRatio as lowBandRatioOf,
+  zeroCrossingRate,
+  vowelLikeness,
+  type VowelBaseline,
+} from "./PhoneticFeatures";
+
+/**
+ * Master kill-switch for the phonetic layer (issue #1 rollback plan). When
+ * `false`, `sample()` skips all spectral work and every phonetic field on the
+ * frame is 0, so the game falls back to the shipped loudness-only behavior.
+ * Typed `boolean` (not the literal `true`) so toggling it never produces
+ * "unreachable code" noise.
+ */
+export const USE_PHONETIC: boolean = true;
+
+/**
+ * The slice of `AnalyserNode` the engine actually uses. Declaring it as an
+ * interface lets tests inject a fake that fills the buffers from canned data —
+ * no AudioContext, no microphone — while a real `AnalyserNode` satisfies it
+ * structurally.
+ */
+export interface SpectralAnalyserLike {
+  fftSize: number;
+  frequencyBinCount: number;
+  getFloatTimeDomainData(array: Float32Array<ArrayBuffer>): void;
+  getFloatFrequencyData(array: Float32Array<ArrayBuffer>): void;
+}
 
 export interface AudioFrame {
   /** Raw smoothed RMS amplitude (roughly 0..0.5 for normal speech). */
@@ -34,6 +74,18 @@ export interface AudioFrame {
   voicedMs: number;
   /** Milliseconds of silence since voicing stopped (0 while voiced). */
   silenceMs: number;
+
+  // ---- phonetic layer (issue #1); all 0 when USE_PHONETIC is false ----
+  /** Spectral flatness 0..1: ~0 tonal/vowel, ~1 noisy/shriek. */
+  flatness: number;
+  /** Spectral centroid in Hz: low = dark/vowel, high = bright/shriek. */
+  centroid: number;
+  /** Fraction of energy below 1 kHz, 0..1: high for vowels. */
+  lowBandRatio: number;
+  /** Zero-crossing rate 0..1: low for vowels, high for fricatives/shrieks. */
+  zcr: number;
+  /** Blended 0..1 "how vowel-like is this sound" — the score the game grades on. */
+  vowelLikeness: number;
 }
 
 export type MicStatus =
@@ -48,9 +100,16 @@ export class AudioEngine {
   errorMessage = "";
 
   private ctx: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
+  private analyser: SpectralAnalyserLike | null = null;
   private stream: MediaStream | null = null;
   private buf: Float32Array<ArrayBuffer> = new Float32Array(0);
+  private freqDb: Float32Array<ArrayBuffer> = new Float32Array(0);
+  private mag: Float32Array<ArrayBuffer> = new Float32Array(0);
+  private sampleRate = 44100;
+
+  // Optional per-child vowel baseline (from the mic-check calibration) so a
+  // 3-yr-old's high formants aren't misread as noise. Null = use adult default.
+  private vowelBaseline: VowelBaseline | null = null;
 
   // Smoothed RMS with asymmetric attack/release so the meter snaps up fast but
   // settles down gently (feels alive, not jittery).
@@ -73,8 +132,33 @@ export class AudioEngine {
 
   private lastSampleTime = 0;
 
+  /**
+   * @param opts.analyser — inject a fake analyser for tests; when given, the
+   *   engine is wired up for `sample()` without `init()` / a real mic.
+   * @param opts.sampleRate — sample rate to assume for the injected analyser.
+   */
+  constructor(opts?: { analyser?: SpectralAnalyserLike; sampleRate?: number }) {
+    if (opts?.analyser) {
+      this.attachAnalyser(opts.analyser, opts.sampleRate ?? 44100);
+      this.status = "running";
+      this.lastSampleTime = 0;
+    }
+  }
+
   get isRunning(): boolean {
     return this.status === "running";
+  }
+
+  /** Allocate the working buffers for a given analyser + sample rate. */
+  private attachAnalyser(
+    analyser: SpectralAnalyserLike,
+    sampleRate: number,
+  ): void {
+    this.analyser = analyser;
+    this.sampleRate = sampleRate;
+    this.buf = new Float32Array(analyser.fftSize);
+    this.freqDb = new Float32Array(analyser.frequencyBinCount);
+    this.mag = new Float32Array(analyser.frequencyBinCount);
   }
 
   /**
@@ -112,12 +196,12 @@ export class AudioEngine {
         .webkitAudioContext;
     this.ctx = new Ctx();
     const src = this.ctx.createMediaStreamSource(this.stream);
-    this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 1024;
+    const analyser = this.ctx.createAnalyser();
+    analyser.fftSize = 1024;
     // We smooth manually for full control over attack/release.
-    this.analyser.smoothingTimeConstant = 0;
-    src.connect(this.analyser);
-    this.buf = new Float32Array(this.analyser.fftSize);
+    analyser.smoothingTimeConstant = 0;
+    src.connect(analyser);
+    this.attachAnalyser(analyser, this.ctx.sampleRate);
 
     await this.resume();
     this.status = "running";
@@ -140,24 +224,27 @@ export class AudioEngine {
   recalibrate(): void {
     this.calibrating = true;
     this.calibSamples = [];
+    // Drop any stale per-child vowel baseline; main.ts re-measures it during
+    // the mic-check that follows a recalibrate.
+    this.vowelBaseline = null;
+  }
+
+  /**
+   * Set (or clear) the per-child sustained-vowel baseline used to score the
+   * spectral centroid *relative* to her own voice. See the age note in #1.
+   */
+  setVowelBaseline(baseline: VowelBaseline | null): void {
+    this.vowelBaseline = baseline;
   }
 
   /**
    * Read one frame. Call once per requestAnimationFrame. Cheap (one pass over a
-   * 1024-sample buffer). Returns a neutral frame until the mic is running.
+   * 1024-sample buffer, one over the 512-bin spectrum). Returns a neutral frame
+   * until the mic is running.
    */
   sample(now: number): AudioFrame {
     if (!this.analyser) {
-      return {
-        rms: 0,
-        noiseFloor: this.noiseFloor,
-        level: 0,
-        voiced: false,
-        onset: false,
-        release: false,
-        voicedMs: 0,
-        silenceMs: 0,
-      };
+      return this.neutralFrame();
     }
 
     const dt = Math.min(100, now - this.lastSampleTime || 16);
@@ -232,6 +319,29 @@ export class AudioEngine {
     const voicedMs = this.voiced ? now - this.voicedSince : 0;
     const silenceMs = this.voiced ? 0 : now - this.silenceSince;
 
+    // ---- phonetic layer (additive, behind the kill-switch) ----
+    let flatness = 0;
+    let centroid = 0;
+    let lowBand = 0;
+    let zcr = 0;
+    let vl = 0;
+    if (USE_PHONETIC) {
+      this.analyser.getFloatFrequencyData(this.freqDb);
+      // AnalyserNode hands back dB; convert once to linear magnitude. Empty bins
+      // are -Infinity dB → 0 magnitude (no NaN).
+      for (let i = 0; i < this.freqDb.length; i++) {
+        this.mag[i] = Math.pow(10, this.freqDb[i] / 20);
+      }
+      flatness = spectralFlatness(this.mag);
+      centroid = spectralCentroid(this.mag, this.sampleRate);
+      lowBand = lowBandRatioOf(this.mag, this.sampleRate);
+      zcr = zeroCrossingRate(this.buf);
+      vl = vowelLikeness(
+        { flatness, centroid, lowBandRatio: lowBand, zcr },
+        this.vowelBaseline,
+      );
+    }
+
     return {
       rms,
       noiseFloor: this.noiseFloor,
@@ -241,6 +351,30 @@ export class AudioEngine {
       release,
       voicedMs,
       silenceMs,
+      flatness,
+      centroid,
+      lowBandRatio: lowBand,
+      zcr,
+      vowelLikeness: vl,
+    };
+  }
+
+  /** The frame returned before the mic is running (all-quiet, no phonetics). */
+  private neutralFrame(): AudioFrame {
+    return {
+      rms: 0,
+      noiseFloor: this.noiseFloor,
+      level: 0,
+      voiced: false,
+      onset: false,
+      release: false,
+      voicedMs: 0,
+      silenceMs: 0,
+      flatness: 0,
+      centroid: 0,
+      lowBandRatio: 0,
+      zcr: 0,
+      vowelLikeness: 0,
     };
   }
 

@@ -1,4 +1,16 @@
-import type { WordScene } from "./types";
+import type { AcousticPattern, WordScene } from "./types";
+
+/**
+ * Rung-1 shape shared by the current кот/дом/кит words: hold a vowel-like sound
+ * for ~600 ms, then stop. The matcher grades the hold by vowelLikeness and only
+ * arms the pounce after a real sustained vowel + a genuine stop gap — which is
+ * what stops the "continuous scream" and "single shout" cheats.
+ */
+const RUNG1_HOLD_STOP: AcousticPattern = {
+  rung: 1,
+  sustain: { minMs: 600, want: "vowel" },
+  release: { requireGapMs: 120 },
+};
 
 /**
  * Word bank. The MVP focuses on «кот», but the structure is ready for the
@@ -18,6 +30,7 @@ export const WORDS: WordScene[] = [
     chaser: "🐱",
     fleer: "🐭",
     theme: "meadow",
+    pattern: RUNG1_HOLD_STOP,
   },
   // --- ready for later (not surfaced in the MVP flow yet) ---
   {
@@ -31,6 +44,7 @@ export const WORDS: WordScene[] = [
     chaser: "🐶",
     fleer: "🦴",
     theme: "meadow",
+    pattern: RUNG1_HOLD_STOP,
   },
   {
     id: "kit",
@@ -43,6 +57,7 @@ export const WORDS: WordScene[] = [
     chaser: "🐳",
     fleer: "🐟",
     theme: "meadow",
+    pattern: RUNG1_HOLD_STOP,
   },
 ];
 

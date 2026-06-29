@@ -1,7 +1,8 @@
 import "./style.css";
-import { AudioEngine } from "./audio/AudioEngine";
+import { AudioEngine, USE_PHONETIC } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
 import { GameView } from "./game/GameView";
+import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { DEFAULT_WORD } from "./game/words";
 import { speakWord } from "./game/sfx";
 
@@ -51,7 +52,14 @@ app.innerHTML = `
       <div class="cheer">Ура! 🎉</div>
       <button class="btn btn-go" id="againBtn">Ещё раз 🔁</button>
     </div>
-    <button class="parent-link" id="recalBtn">⚙ микрофон</button>
+    <div class="parent-controls">
+      <label class="assist-control" id="assistControl">
+        <span class="assist-cap">строго</span>
+        <input type="range" id="assistSlider" min="0" max="1" step="0.1" value="0.5" aria-label="Строгость распознавания" />
+        <span class="assist-cap">легче</span>
+      </label>
+      <button class="parent-link" id="recalBtn">⚙ микрофон</button>
+    </div>
   </section>
 `;
 
@@ -67,6 +75,8 @@ const retryBtn = el<HTMLButtonElement>("#retryBtn");
 const listenBtn = el<HTMLButtonElement>("#listenBtn");
 const againBtn = el<HTMLButtonElement>("#againBtn");
 const recalBtn = el<HTMLButtonElement>("#recalBtn");
+const assistControl = el<HTMLElement>("#assistControl");
+const assistSlider = el<HTMLInputElement>("#assistSlider");
 const checkHint = el<HTMLElement>("#checkHint");
 const celebrate = el<HTMLElement>("#celebrate");
 const sustainEl = el<HTMLElement>("#sustainEl");
@@ -79,6 +89,69 @@ const deniedText = el<HTMLElement>("#deniedText");
 sustainEl.textContent = game.getScene().sustainPart;
 burstEl.textContent = game.getScene().burstPart;
 hintEl.textContent = game.getScene().hint;
+
+// ---------- phonetic ladder (issue #1) ----------
+// The whole layer hides behind USE_PHONETIC: off → no matcher, no slider, and
+// the game runs exactly as the shipped loudness-only build.
+
+/** 0 = strict grading, 1 = easy (close to today's loudness-only feel). */
+let assist = 0.5;
+/** Hold threshold for vowel-likeness; tightened/relaxed by mic-check calibration. */
+let calibHoldThreshold = MIN_HOLD_THRESHOLD;
+/** The matcher for the active round (rebuilt each round from the latest config). */
+let matcher: PatternMatcher | null = null;
+
+// Per-session vowel-baseline calibration, sampled while the child makes sound on
+// the mic-check screen. A 3-yr-old's formants are high, so we score her centroid
+// relative to her own voice (see the age note in #1) instead of an adult number.
+let calibVowel: number[] = [];
+let calibCentroid: number[] = [];
+
+function resetCalibrationSamples(): void {
+  calibVowel = [];
+  calibCentroid = [];
+}
+
+function mean(xs: number[]): number {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+}
+
+/**
+ * Turn the mic-check samples into a per-child baseline + hold threshold. Needs a
+ * little voiced audio; if the caregiver skipped making sound, we fall back to the
+ * generous adult defaults rather than guessing.
+ */
+function finalizeCalibration(): void {
+  if (!USE_PHONETIC) return;
+  if (calibVowel.length >= 12) {
+    audio.setVowelBaseline({ centroid: mean(calibCentroid) });
+    calibHoldThreshold = Math.max(MIN_HOLD_THRESHOLD, mean(calibVowel) * 0.6);
+  } else {
+    audio.setVowelBaseline(null);
+    calibHoldThreshold = MIN_HOLD_THRESHOLD;
+  }
+}
+
+/** (Re)build the matcher for the current scene; null when phonetics are off. */
+function buildMatcher(): void {
+  if (!USE_PHONETIC) {
+    matcher = null;
+    game.setMatcher(null);
+    return;
+  }
+  matcher = new PatternMatcher(game.getScene().pattern, {
+    assist,
+    holdThreshold: calibHoldThreshold,
+  });
+  game.setMatcher(matcher);
+}
+
+// The assist slider is meaningless without the phonetic layer — hide it then.
+if (!USE_PHONETIC) assistControl.style.display = "none";
+assistSlider.addEventListener("input", () => {
+  assist = parseFloat(assistSlider.value);
+  matcher?.setAssist(assist);
+});
 
 // ---------- screen management ----------
 let current: Screen = "start";
@@ -101,6 +174,8 @@ function showScreen(name: Screen): void {
 
 // ---------- game round helpers ----------
 function startRound(): void {
+  // Build the matcher first so game.reset() (which resets it) sees the right one.
+  buildMatcher();
   game.reset();
   celebrate.classList.remove("show");
   // Model the target word, muting chase input so the TTS doesn't move the cat.
@@ -133,6 +208,7 @@ async function beginMic(): Promise<void> {
   retryBtn.disabled = false;
   if (ok) {
     audio.recalibrate();
+    resetCalibrationSamples();
     showScreen("check");
   } else if (audio.status === "denied") {
     deniedTitle.textContent = "Нужен микрофон 🎤";
@@ -148,11 +224,16 @@ async function beginMic(): Promise<void> {
   }
 }
 
-playBtn.addEventListener("click", () => showScreen("game"));
+playBtn.addEventListener("click", () => {
+  // Lock in her vowel baseline from the mic-check before the chase begins.
+  finalizeCalibration();
+  showScreen("game");
+});
 againBtn.addEventListener("click", () => startRound());
 listenBtn.addEventListener("click", () => modelWord());
 recalBtn.addEventListener("click", () => {
   audio.recalibrate();
+  resetCalibrationSamples();
   checkHint.textContent = "Настраиваю…";
   showScreen("check");
 });
@@ -170,6 +251,16 @@ function loop(now: number): void {
       checkHint.textContent = "Слышу тебя! 👍";
     } else if (!audio.isRunning) {
       checkHint.textContent = "Жду звук…";
+    }
+    // Sample her sustained-vowel baseline while she makes sound (issue #1).
+    if (USE_PHONETIC && frame.voiced && frame.level > 0.2) {
+      calibVowel.push(frame.vowelLikeness);
+      calibCentroid.push(frame.centroid);
+      // Cap so a long mic-check can't grow these unbounded.
+      if (calibVowel.length > 240) {
+        calibVowel.shift();
+        calibCentroid.shift();
+      }
     }
   } else if (current === "game") {
     game.step(frame, now, dt);
