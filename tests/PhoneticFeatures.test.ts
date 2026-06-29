@@ -96,4 +96,32 @@ describe("vowelLikeness", () => {
     const withBaseline = vowelLikeness(childVowel, { centroid: 2200 });
     expect(withBaseline).toBeGreaterThan(withoutBaseline);
   });
+
+  // Real-mic regression: with an FFT noise floor, flatness can't tell a vowel
+  // from «шшш» (both look tonal), which is exactly why it was caught propping up
+  // noise on the live game. vowelLikeness must still separate them cleanly.
+  it("separates a vowel from «шшш» on realistic noise-floor spectra", () => {
+    const noiseFloor = () => new Float32Array(N).fill(1e-5);
+
+    const vowelMag = noiseFloor(); // harmonics in the low band (f0 ~215 Hz)
+    for (const b of [5, 10, 15, 20, 25]) vowelMag[b] = 0.12;
+    const shhhMag = noiseFloor(); // broadband hiss ~2.6–6 kHz
+    for (let b = 60; b < 140; b++) shhhMag[b] = 0.02;
+
+    const feat = (mag: Float32Array, time: Float32Array) => ({
+      flatness: spectralFlatness(mag),
+      centroid: spectralCentroid(mag, SR),
+      lowBandRatio: lowBandRatio(mag, SR),
+      zcr: zeroCrossingRate(time),
+    });
+    const vowel = feat(vowelMag, sineTime(220, 0.3));
+    const shhh = feat(shhhMag, noiseTime(0.3));
+
+    // The smoking gun: flatness does NOT separate them (both read ~tonal).
+    expect(Math.abs(vowel.flatness - shhh.flatness)).toBeLessThan(0.2);
+    // But the verdict does, with wide margin.
+    expect(vowelLikeness(vowel)).toBeGreaterThan(0.6);
+    expect(vowelLikeness(shhh)).toBeLessThan(0.3);
+    expect(vowelLikeness(vowel) - vowelLikeness(shhh)).toBeGreaterThan(0.4);
+  });
 });

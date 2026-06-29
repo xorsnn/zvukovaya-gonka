@@ -25,17 +25,44 @@
  * child vowel is not mistaken for noise. See the age note in issue #1. */
 export const DEFAULT_CENTROID_REF = 3000; // Hz
 
-/** Weights for the {@link vowelLikeness} blend. They sum to 1. The two
- * pitch-robust features (flatness, ZCR) carry the majority (0.6) so a high
- * child fundamental does not penalize a correct vowel; the absolute-frequency
- * terms (centroid, low-band) carry the rest and centroid is scored *relative*
- * to a baseline when one is supplied. */
+/**
+ * Weights for the {@link vowelLikeness} blend (sum to 1).
+ *
+ * REAL-MIC TUNING (issue #1 follow-up): spectral flatness — the feature the
+ * original spec leaned on hardest — proved unreliable on a live microphone. A
+ * real FFT has hundreds of near-silent noise-floor bins (~−100 dB); those
+ * dominate the geometric mean, so flatness reads ≈0 ("tonal") for BOTH a vowel
+ * AND a hissy «шшш». With 0.4 of the weight that near-constant wrongly propped
+ * noise over the hold threshold (a fricative caught the mouse like a vowel).
+ *
+ * So flatness is dropped from the blend (still computed, for the debug overlay)
+ * and the weight moves to the three noise-floor-robust features: zero-crossing
+ * rate, spectral centroid, and the low-band energy ratio. These cleanly separate
+ * a vowel (low ZCR, dark centroid, low-heavy energy) from a fricative/hiss (high
+ * ZCR, bright centroid, high-heavy energy). ZCR leads — it is time-domain, so it
+ * never sees the FFT noise floor at all.
+ */
 export const VOWEL_WEIGHTS = {
-  flatness: 0.4,
-  zcr: 0.2,
+  zcr: 0.45,
   centroid: 0.25,
-  lowBand: 0.15,
+  lowBand: 0.3,
 } as const;
+
+/**
+ * Zero-crossing-rate knee. At/below {@link ZCR_LOW} the sound is fully "vowel"
+ * on this axis; at/above {@link ZCR_HIGH} it is fully "noise". A held vowel sits
+ * ~0.02–0.15; a sibilant /ш/ or hiss ~0.30–0.6, so the knee separates them
+ * sharply instead of the soft `1 − zcr` ramp (which left fricatives mid-scale).
+ *
+ * {@link ZCR_SILENCE} is the catch: true silence / DC also has ~0 crossings, but
+ * that is the *absence* of a signal, not a pure tone. Without a floor, the soft
+ * decay tail after a stop (when the engine's smoothed RMS still reads "voiced"
+ * for ~400 ms but the samples are ~0) would score as a sustained vowel and keep
+ * a too-short hold alive. So ZCR below this floor scores 0 on the vowel axis.
+ */
+export const ZCR_SILENCE = 0.004;
+export const ZCR_LOW = 0.05;
+export const ZCR_HIGH = 0.3;
 
 export interface SpectralFeatures {
   /** 0..1 — geometric/arithmetic mean ratio. ~0 tonal, ~1 noisy. */
@@ -146,13 +173,14 @@ export function lowBandRatio(mag: Float32Array, sampleRate: number): number {
 /**
  * vowelLikeness — the single 0..1 verdict the rest of the game grades on.
  *
- * A weighted blend of the four features (see {@link VOWEL_WEIGHTS}). Each
- * sub-term is normalized to 0..1 where 1 = "more vowel-like":
- *   - flatness   → `1 - flatness`   (tonal is vowel-like)
- *   - zcr        → `1 - zcr`        (slow zero-crossing is vowel-like)
- *   - centroid   → `1 - centroid/ref` (dark is vowel-like; `ref` is the child's
- *                  baseline*2.2 when calibrated, else a generous adult default)
- *   - lowBand    → `lowBandRatio`   (low-heavy is vowel-like)
+ * A weighted blend of the three noise-floor-robust features (see
+ * {@link VOWEL_WEIGHTS}; flatness is intentionally excluded — see the note
+ * there). Each sub-term is normalized to 0..1 where 1 = "more vowel-like":
+ *   - zcr      → a sharp knee between {@link ZCR_LOW} and {@link ZCR_HIGH}
+ *               (slow zero-crossing is vowel-like; a hiss crosses fast)
+ *   - centroid → `1 - centroid/ref` (dark is vowel-like; `ref` is the child's
+ *               baseline*2.2 when calibrated, else a generous adult default)
+ *   - lowBand  → `lowBandRatio` (energy concentrated low is vowel-like)
  *
  * `baseline` (optional) makes the centroid term *relative* to the child's own
  * sustained vowel, which matters because a 3-yr-old's formants are high enough
@@ -162,14 +190,15 @@ export function vowelLikeness(
   features: SpectralFeatures,
   baseline?: VowelBaseline | null,
 ): number {
-  const { flatness, centroid, lowBandRatio: low, zcr } = features;
+  const { centroid, lowBandRatio: low, zcr } = features;
   const centroidRef = baseline
     ? Math.max(DEFAULT_CENTROID_REF * 0.8, baseline.centroid * 2.2)
     : DEFAULT_CENTROID_REF;
+  const zcrScore =
+    zcr < ZCR_SILENCE ? 0 : clamp01((ZCR_HIGH - zcr) / (ZCR_HIGH - ZCR_LOW));
   const centroidScore = clamp01(1 - centroid / centroidRef);
   const score =
-    VOWEL_WEIGHTS.flatness * clamp01(1 - flatness) +
-    VOWEL_WEIGHTS.zcr * clamp01(1 - zcr) +
+    VOWEL_WEIGHTS.zcr * zcrScore +
     VOWEL_WEIGHTS.centroid * centroidScore +
     VOWEL_WEIGHTS.lowBand * clamp01(low);
   return clamp01(score);
