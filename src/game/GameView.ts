@@ -162,6 +162,11 @@ export class GameView {
     this.lastMatch = null;
   }
 
+  /** Latest matcher verdict, for the debug overlay (null on the loudness path). */
+  get debugMatch(): MatchState | null {
+    return this.lastMatch;
+  }
+
   /** Smoothed chase progress 0..1, for host UI (prompt highlight). */
   get chaseProgress(): number {
     return this.displayProgress;
