@@ -33,6 +33,16 @@ target vowel is the faster one. It ships behind `config.rung2`,
 **off by default** until tuned on the real mic; with it off, behavior is exactly
 Rung 1.
 
+**Rung 3 (#6)** tells the *release shape* apart — a **stop** («т»: a sustained
+hold → a near-silence closure, optionally a burst), a **sonorant** hum («р»/«м»:
+continuous low-ZCR voicing, no gap), and a **fricative** hiss («ш»/«с»). Still
+no recognition and no gate: a pure `classifyConsonant` only *labels* the recent
+window, and for a «т»-final scene the matcher *adds* an earlier burst-catch on
+the «т» release. It ships behind `config.rung3`, **off by default**; with it off
+behavior is exactly Rung 1/2, and even on, a real vowel hold + a stop always
+catches — running out of breath (no crisp burst) still wins, and a lone «т» or a
+continuous «р» hum is never enough on its own.
+
 Everything is driven from the Web Audio API `AnalyserNode`
 (`getFloatTimeDomainData` → RMS + ZCR; `getFloatFrequencyData` → the spectral
 features):
@@ -94,9 +104,11 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
 
 - **`src/audio/PhoneticFeatures.ts`** — pure, unit-tested DSP: zero-crossing
   rate, spectral flatness / centroid / low-band ratio, the `vowelLikeness`
-  blend, and (Rung 2, #5) `estimateFormants` + `vowelMatch` — a coarse F1/F2
-  estimate scored against the target vowel in the child's own formant space. No
-  state, no Web Audio — just `Float32Array` in, number out.
+  blend, (Rung 2, #5) `estimateFormants` + `vowelMatch` — a coarse F1/F2
+  estimate scored against the target vowel in the child's own formant space —
+  and (Rung 3, #6) `classifyConsonant` — a coarse stop / sonorant / fricative
+  label over a recent release window. No state, no Web Audio — just
+  `Float32Array` in, number/label out.
 - **`src/audio/AudioEngine.ts`** — mic capture, the loudness envelope, **and**
   the spectral feature layer (gated by `setPhoneticEnabled`, driven from the
   config's "is any rung on?" flag). RMS with
@@ -112,9 +124,11 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   chase speed (`driveQuality`), decides when a vowel hold is long enough to arm
   the pounce, and fires the catch on a genuine stop. With Rung 2 on it folds a
   bounded vowel-match factor into the speed (a closer vowel runs faster) — but
-  never into the hold or the catch. Two thresholds (a lenient "counts as trying"
-  gate + the graded speed) and an `assist` knob keep it forgiving. Pure and
-  deterministic.
+  never into the hold or the catch. With Rung 3 on it labels the release
+  (`consonantClass`) and, for a `"stop"` scene, adds an earlier burst-catch on
+  the «т» release (`burstDetected`) — additive only; the gap-only catch still
+  wins. Two thresholds (a lenient "counts as trying" gate + the graded speed)
+  and an `assist` knob keep it forgiving. Pure and deterministic.
 - **`src/game/GameView.ts`** — the canvas chase. Progress accumulates while
   voiced (and never decays on a pause). With the matcher, speed = `MIN_FLOOR +
   (1−MIN_FLOOR)·driveQuality` and the catch is gated on a real hold + stop; with
@@ -129,15 +143,16 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   feed back into the chase).
 - **`src/game/words.ts` / `types.ts`** — the content model. A `WordScene` is the
   unit of content and now carries an `AcousticPattern` (which ladder rung, how
-  long to hold, the required stop gap, and an optional target `vowel` for Rung
-  2). The chase mechanic is generic, so adding a `[hold]+[stop]` word (дом, кит,
+  long to hold, the required stop gap, an optional target `vowel` for Rung 2, and
+  an optional `release.want: "stop"` for Rung 3 — «кот»/«кит» ask for a real
+  «т»). The chase mechanic is generic, so adding a `[hold]+[stop]` word (дом, кит,
   …) is just adding data.
 - **`src/game/config.ts`** — the `PhoneticConfig` single source of truth (issue
   #4): per-rung flags (`rung1`/`rung2`/`rung3`), the `assist` continuum, and a
   `debug` flag, plus a tiny `localStorage`-backed store. The store never throws —
   corrupt/partial/private-mode storage all degrade to `DEFAULT_CONFIG`. The
   engine reads `anyRungOn(config)`; the matcher reads `assist` + `rung1` +
-  `rung2` (with the per-child formant baseline).
+  `rung2` (with the per-child formant baseline) + `rung3`.
 - **`src/main.ts`** — screen flow (start → mic check → game), the single master
   render loop, mic-permission handling, the graceful denied/error fallback,
   the per-round matcher wiring, the caregiver settings panel (per-rung toggles +
@@ -178,9 +193,9 @@ they grade on **Rung 1** (vowel-ish vs noise) and each tags a target `vowel` for
   `SceneType` beyond `"chase"`.
 - The **phonetic discrimination ladder** (issue #1): Rung 0 = hold→gap→stop
   shape · Rung 1 = vowel vs noise (built) · Rung 2 = which vowel (formants,
-  built — #5, default off) · Rung 3 = consonant class · Rung 4 = syllable. Each
-  new rung is a finer `AcousticPattern` + (for ≥2) new features in
-  `PhoneticFeatures.ts`.
+  built — #5, default off) · Rung 3 = consonant class / real «т» stop (built —
+  #6, default off) · Rung 4 = syllable. Each new rung is a finer
+  `AcousticPattern` + (for ≥2) new features in `PhoneticFeatures.ts`.
 - Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` in `GameView.ts`, the
   `VOWEL_WEIGHTS` blend in `PhoneticFeatures.ts`, and the per-scene
   `AcousticPattern` (`minMs`, `requireGapMs`) in `words.ts`.

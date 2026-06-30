@@ -7,6 +7,8 @@ import {
   vowelLikeness,
   estimateFormants,
   vowelMatch,
+  classifyConsonant,
+  type ReleaseFrame,
 } from "../src/audio/PhoneticFeatures";
 import { sineTime, noiseTime } from "./_helpers";
 
@@ -260,5 +262,78 @@ describe("vowelMatch", () => {
     // neutral, never propagate into a NaN driveQuality that freezes the cat.
     expect(vowelMatch({ f1: NaN, f2: 950 }, "о", baseA)).toBe(1);
     expect(vowelMatch({ f1: 560, f2: NaN }, "о", baseA)).toBe(1);
+  });
+});
+
+// --- Rung 3 (#6): coarse consonant class ----------------------------------
+
+/** Build a run of `n` identical release frames (voiced + zcr). */
+function run(n: number, voiced: boolean, zcr = 0): ReleaseFrame[] {
+  return Array.from({ length: n }, () => ({ voiced, zcr }));
+}
+
+describe("classifyConsonant (Rung 3, #6)", () => {
+  const VOWEL_ZCR = 0.03; // tonal, low-ZCR (a vowel / sonorant)
+  const HISS_ZCR = 0.45; // broadband hiss (a fricative)
+
+  it("AC#1: a hold then a closure gap is a STOP", () => {
+    // A sustained low-ZCR voiced run, then near-silence — «ооо» → «т» closure.
+    const frames = [...run(12, true, VOWEL_ZCR), ...run(8, false)];
+    expect(classifyConsonant(frames)).toBe("stop");
+  });
+
+  it("AC#1: a hold → closure → burst → silence is still a STOP (the «т» release)", () => {
+    // The re-onset burst resets the closure count, but the post-burst silence is
+    // itself a real gap, so the crisp «т» still reads as a stop.
+    const frames = [
+      ...run(12, true, VOWEL_ZCR), // «ооо» hold
+      ...run(3, false), // closure
+      ...run(1, true, HISS_ZCR), // «т» burst (a brief noisy transient)
+      ...run(8, false), // final silence
+    ];
+    expect(classifyConsonant(frames)).toBe("stop");
+  });
+
+  it("AC#1: a continuous low-ZCR voiced hum with no gap is a SONORANT", () => {
+    // A held «р»/«м» — vowel-like to Rung 1, but it never closes into a stop.
+    expect(classifyConsonant(run(24, true, VOWEL_ZCR))).toBe("sonorant");
+  });
+
+  it("AC#1: a sustained high-ZCR hiss is a FRICATIVE (texture wins over a trailing gap)", () => {
+    // «шшш»: voiced-above-floor but hiss-like throughout. Even with a closing
+    // gap, the texture decides first — it is a fricative, not a stop.
+    expect(classifyConsonant(run(20, true, HISS_ZCR))).toBe("fricative");
+    expect(
+      classifyConsonant([...run(12, true, HISS_ZCR), ...run(8, false)]),
+    ).toBe("fricative");
+  });
+
+  it("the three classes are mutually separable on the same window length", () => {
+    const stop = [...run(10, true, VOWEL_ZCR), ...run(8, false)];
+    const sonorant = run(18, true, VOWEL_ZCR);
+    const fricative = run(18, true, HISS_ZCR);
+    const labels = [stop, sonorant, fricative].map((w) => classifyConsonant(w));
+    expect(labels).toEqual(["stop", "sonorant", "fricative"]);
+    expect(new Set(labels).size).toBe(3);
+  });
+
+  it("returns 'none' for silence or a lone click (too little signal)", () => {
+    expect(classifyConsonant(run(20, false))).toBe("none"); // pure silence
+    expect(classifyConsonant([])).toBe("none"); // empty window
+    // A lone «т» click: one voiced frame, no sustained hold → not a stop/sonorant.
+    expect(classifyConsonant([...run(2, false), ...run(1, true, HISS_ZCR), ...run(6, false)])).toBe("none");
+  });
+
+  it("returns 'none' for voicing too scattered to sustain (no real hold)", () => {
+    // Voiced total ≥ minVoiced, but never 3 consecutive → not a hum, not a stop.
+    const flicker: ReleaseFrame[] = [];
+    for (let i = 0; i < 8; i++) flicker.push({ voiced: i % 2 === 0, zcr: VOWEL_ZCR });
+    expect(classifyConsonant(flicker)).toBe("none");
+  });
+
+  it("a brief sub-threshold flicker after the hold is NOT a stop", () => {
+    // A 2-frame dip (< CONSONANT_GAP_FRAMES) inside a hum doesn't close a stop.
+    const frames = [...run(8, true, VOWEL_ZCR), ...run(2, false), ...run(8, true, VOWEL_ZCR)];
+    expect(classifyConsonant(frames)).toBe("sonorant");
   });
 });

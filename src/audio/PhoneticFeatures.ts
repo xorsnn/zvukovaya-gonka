@@ -377,3 +377,115 @@ export function vowelMatch(
   const s = 2 * VOWEL_MATCH_SIGMA * VOWEL_MATCH_SIGMA;
   return clamp01(Math.exp(-dist2 / s));
 }
+
+// ===========================================================================
+// Rung 3 (#6) — coarse consonant class & the real «т» stop.
+//
+// STILL NOT speech recognition: we read the recent ENVELOPE + texture and label
+// the *release shape*, never the phoneme. Three coarse classes the chase cares
+// about:
+//   - stop      «т»/«к»: a sustained voiced run, then a near-silence CLOSURE,
+//               optionally a burst (a fresh re-onset, the «т» release).
+//   - fricative «ш»/«с»: a sustained HISS — voiced-above-floor but high-ZCR
+//               throughout (already low `vowelLikeness` in Rung 1).
+//   - sonorant  «р»/«м»: a continuous low-ZCR voiced HUM with NO closure gap.
+// The classifier is pure and gates nothing — it only LABELS (the debug overlay,
+// the burst highlight) and informs the matcher's *bonus* burst-catch. A "wrong"
+// class never withholds a catch (leniency); see the matcher.
+// ===========================================================================
+
+/** The coarse release classes the chase distinguishes (Rung 3, #6). */
+export type ConsonantClass = "stop" | "sonorant" | "fricative" | "none";
+
+/**
+ * One frame of the recent envelope the classifier reads. Deliberately tiny:
+ * `voiced` (above the engine's off-threshold) plus `zcr` (the vowel/hiss
+ * texture) are all the coarse stop / sonorant / fricative split needs — no new
+ * heavy DSP, per issue #6.
+ */
+export interface ReleaseFrame {
+  /** Sound present above the noise floor this frame. */
+  voiced: boolean;
+  /** Zero-crossing rate 0..1 — high for a hiss, low for a tonal vowel/sonorant. */
+  zcr: number;
+}
+
+/** A voiced frame at/above this ZCR is hiss-like (a fricative), not a tonal
+ * vowel/sonorant. Shares the {@link ZCR_HIGH} knee used by `vowelLikeness`. */
+export const CONSONANT_FRICATIVE_ZCR = ZCR_HIGH;
+/** Fraction of the *voiced* frames that must be hiss-like to call the whole
+ * release a fricative. */
+export const CONSONANT_FRICATIVE_FRAC = 0.5;
+/** A run of at least this many non-voiced frames after the hold is a real
+ * CLOSURE (a stop), not a momentary flicker. */
+export const CONSONANT_GAP_FRAMES = 3;
+/** A voiced run needs at least this many consecutive frames to count as a
+ * sustained hold/hum — so a lone click is "none", not a sonorant. */
+export const CONSONANT_MIN_VOICED_FRAMES = 3;
+
+/**
+ * classifyConsonant — label a recent release window as a stop, a sonorant hum,
+ * a fricative hiss, or none. Pure: feed it a canned array in a test (AC#1).
+ *
+ * Decision order (coarsest, most distinctive first):
+ *   1. fricative — a majority of the *voiced* frames are hiss-like (high ZCR).
+ *      A «шшш» is voiced-above-floor throughout but never tonal.
+ *   2. stop — a sustained voiced run is followed (anywhere after) by a real
+ *      near-silence CLOSURE of ≥ {@link CONSONANT_GAP_FRAMES} non-voiced frames.
+ *      Captures «vowel → closure → burst → silence» and plain «vowel → silence»
+ *      alike; the optional re-onset burst only makes the stop crisper.
+ *   3. sonorant — a sustained low-ZCR voiced run with NO closing gap. A held
+ *      «р»/«м» hum reads vowel-like to Rung 1 but never finishes with a stop.
+ *   4. none — too little (or too scattered) signal to say.
+ */
+export function classifyConsonant(
+  frames: ReleaseFrame[],
+  opts?: { gapFrames?: number; minVoicedFrames?: number },
+): ConsonantClass {
+  const gapFrames = opts?.gapFrames ?? CONSONANT_GAP_FRAMES;
+  const minVoiced = opts?.minVoicedFrames ?? CONSONANT_MIN_VOICED_FRAMES;
+  const n = frames.length;
+
+  // Texture: of all voiced frames, how many are hiss-like?
+  let voicedTotal = 0;
+  let hissVoiced = 0;
+  for (const f of frames) {
+    if (f.voiced) {
+      voicedTotal++;
+      if (f.zcr >= CONSONANT_FRICATIVE_ZCR) hissVoiced++;
+    }
+  }
+  if (voicedTotal < minVoiced) return "none";
+  if (hissVoiced / voicedTotal >= CONSONANT_FRICATIVE_FRAC) return "fricative";
+
+  // End of the first SUSTAINED voiced run (≥ minVoiced *consecutive* frames).
+  // Scattered voicing that never sustains is "none", not a hum.
+  let holdEnd = -1;
+  let run = 0;
+  for (let k = 0; k < n; k++) {
+    if (frames[k].voiced) {
+      if (++run >= minVoiced) {
+        holdEnd = k + 1;
+        break;
+      }
+    } else {
+      run = 0;
+    }
+  }
+  if (holdEnd === -1) return "none";
+
+  // A real CLOSURE: a run of ≥ gapFrames non-voiced frames anywhere after the
+  // hold. A burst (re-onset) resets the count, so the closure and the post-burst
+  // silence are weighed independently — either being long enough is a stop.
+  let gap = 0;
+  for (let k = holdEnd; k < n; k++) {
+    if (!frames[k].voiced) {
+      if (++gap >= gapFrames) return "stop";
+    } else {
+      gap = 0;
+    }
+  }
+
+  // Sustained voiced, no closing gap → a continuous sonorant hum.
+  return "sonorant";
+}
