@@ -8,6 +8,8 @@ import {
   estimateFormants,
   vowelMatch,
   classifyConsonant,
+  detectStopBurst,
+  STOP_BURST_MAX_CLOSURE_MS,
   type ReleaseFrame,
 } from "../src/audio/PhoneticFeatures";
 import { sineTime, noiseTime } from "./_helpers";
@@ -347,5 +349,73 @@ describe("classifyConsonant (Rung 3, #6)", () => {
     // A 2-frame dip (< CONSONANT_GAP_FRAMES) inside a hum doesn't close a stop.
     const frames = [...run(8, true, VOWEL_ZCR), ...run(2, false), ...run(8, true, VOWEL_ZCR)];
     expect(classifyConsonant(frames)).toBe("sonorant");
+  });
+});
+
+// --- Rung 3 (#12): the fast «т» stop-burst detector over a canned envelope -----
+
+describe("detectStopBurst (#12)", () => {
+  const FLOOR = 0.01; // a calibrated noise floor
+  const DT = 16; // ms/frame
+  const VOWEL = 0.3; // a loud held-vowel envelope level
+  const CLOSED = 0.005; // near-silence during the closure (< peak·dipFraction)
+
+  /** Build a fast-envelope history: `pre` loud vowel frames, `closure` near-silent
+   * frames, then the latest frame at `last`. Mirrors what the engine accumulates. */
+  const env = (pre: number, closure: number, last: number): number[] => [
+    ...Array(pre).fill(VOWEL),
+    ...Array(closure).fill(CLOSED),
+    last,
+  ];
+
+  it("AC#4: fires on a vowel → 50–150 ms closure → burst", () => {
+    // 5-frame closure ≈ 80 ms, then a burst that rises back near the vowel level.
+    expect(detectStopBurst(env(6, 5, VOWEL), FLOOR, DT)).toBe(true);
+  });
+
+  it("AC#4: does NOT fire on a sustained vowel (no closure, no dip)", () => {
+    const sustained = Array(16).fill(VOWEL);
+    expect(detectStopBurst(sustained, FLOOR, DT)).toBe(false);
+  });
+
+  it("AC#4: does NOT fire on a continuous hum that merely wobbles", () => {
+    // Energy stays well above the dip throughout — no closure to release from.
+    const hum = [0.3, 0.28, 0.31, 0.27, 0.3, 0.29, 0.3, 0.28, 0.3, 0.3];
+    expect(detectStopBurst(hum, FLOOR, DT)).toBe(false);
+  });
+
+  it("does NOT fire on a plain run-out-of-breath (closure but no burst)", () => {
+    // Vowel → closure → stays silent. The breath-stop gap path (matcher) handles
+    // this at the easy end; the burst detector must stay quiet (AC#3 at strict).
+    expect(detectStopBurst(env(6, 6, CLOSED), FLOOR, DT)).toBe(false);
+  });
+
+  it("does NOT fire when the closure is too short (a flicker)", () => {
+    // 1-frame closure ≈ 16 ms < STOP_BURST_MIN_CLOSURE_MS.
+    expect(detectStopBurst(env(8, 1, VOWEL), FLOOR, DT)).toBe(false);
+  });
+
+  it("does NOT fire when the closure is too long (a pause / new word)", () => {
+    // A long silence then a fresh vowel is a restart, not a single «т» release.
+    const tooLong = Math.ceil(STOP_BURST_MAX_CLOSURE_MS / DT) + 2;
+    expect(detectStopBurst(env(4, tooLong, VOWEL), FLOOR, DT)).toBe(false);
+  });
+
+  it("does NOT fire with no preceding vowel (a lone burst from silence)", () => {
+    // Closure with nothing loud before it → there is no held sound being released.
+    const lone = [CLOSED, CLOSED, CLOSED, CLOSED, CLOSED, VOWEL];
+    expect(detectStopBurst(lone, FLOOR, DT)).toBe(false);
+  });
+
+  it("is quiet when everything is near the noise floor (no real sound)", () => {
+    const quiet = [0.008, 0.005, 0.006, 0.004, 0.005, 0.012];
+    expect(detectStopBurst(quiet, FLOOR, DT)).toBe(false);
+  });
+
+  it("only fires on the rising EDGE, not while the burst is sustained", () => {
+    // Frame after the burst: still loud, but its predecessor was already loud →
+    // no fresh rising edge, so it is edge-triggered (one frame), not held.
+    const afterEdge = [...Array(5).fill(VOWEL), CLOSED, CLOSED, CLOSED, VOWEL, VOWEL];
+    expect(detectStopBurst(afterEdge, FLOOR, DT)).toBe(false);
   });
 });

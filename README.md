@@ -33,20 +33,30 @@ target vowel is the faster one. It ships behind `config.rung2`,
 **off by default** until tuned on the real mic; with it off, behavior is exactly
 Rung 1.
 
-**Rung 3 (#6)** tells the *release shape* apart — a **stop** («т»: a sustained
-hold → a near-silence closure, optionally a burst), a **sonorant** hum («р»/«м»:
-continuous low-ZCR voicing, no gap), and a **fricative** hiss («ш»/«с»). Still
-no recognition and no gate: a pure `classifyConsonant` only *labels* the recent
-window, and for a «т»-final scene the matcher *adds* an earlier burst-catch on
-the «т» release. It ships behind `config.rung3`, **off by default**; with it off
-behavior is exactly Rung 1/2, and even on, a real vowel hold + a stop always
-catches — running out of breath (no crisp burst) still wins, and a lone «т» or a
-continuous «р» hum is never enough on its own. **Caveat (pending real-mic
-tuning):** the burst-catch keys off the engine's smoothed `voiced` flag, which
-takes ~387 ms of silence to drop, so a natural «т» closure (50–150 ms) currently
-falls through to the plain final-silence gap (= Rung 1) rather than firing on the
-burst. Making the «т» release genuinely fire needs a faster closure detector and
-real-mic validation — see the note on `RUNG3_MIN_CLOSURE_MS` in `PatternMatcher.ts`.
+**Rung 3 (#6/#12)** tells the *release shape* apart — a **stop** («т»: a sustained
+hold → a near-silence closure → a burst), a **sonorant** hum («р»/«м»: continuous
+low-ZCR voicing, no gap), and a **fricative** hiss («ш»/«с»). A pure
+`classifyConsonant` *labels* the recent window (debug/teaching), and a real fast
+**«т» stop-burst detector** (`detectStopBurst`, #12) reads a brief energy
+**dip (closure) → transient burst** off a dedicated fast envelope — independent of
+the 120 ms-smoothed `voiced` path, so a natural 50–150 ms «т» closure actually
+fires (the original burst-catch keyed off `voiced`, which needs ~387 ms of silence
+to drop, and was inert on real speech; #12 replaces it). The detector is still not
+recognition — it reads the envelope *shape*, never the phoneme, and can't tell «т»
+from «к»/«п» (place of articulation). It ships behind `config.rung3`, **off by
+default**; with it off behavior is exactly Rung 1/2.
+
+**The chase is now a tug-of-war (#12).** The vowel runs the cat; the final «т»
+triggers the pounce. Net progress is `catDrive − mouseFlee`, with the mouse's
+flee speed scaled by the one **строго ↔ легче** (strict ↔ easy) slider, so the same
+build serves a child who just needs to vocalize and one ready to drill the «т»:
+
+- At the **easy** end the mouse never flees (progress is monotonic, exactly as
+  before) and simply running out of breath still finishes the catch.
+- At the **strict** end the right vowel makes the cat gain while a wrong vowel or
+  silence lets the mouse escape back toward the start, and the catch fires **only**
+  on a real «т» burst — running out of breath no longer wins. The escape hatch is
+  the slider itself, not a fail screen.
 
 Everything is driven from the Web Audio API `AnalyserNode`
 (`getFloatTimeDomainData` → RMS + ZCR; `getFloatFrequencyData` → the spectral
@@ -55,27 +65,37 @@ features):
 - **Any** voiced sound above the noise floor still makes the cat run; a clearer,
   steadier vowel just makes it run **faster** (graded by `vowelLikeness`, never
   punished). This rewards _vocalizing at all_ — the therapeutic goal — while
-  nudging toward the target sound.
+  nudging toward the target sound. Toward the strict end the mouse also flees, so
+  the *right* vowel is what keeps the cat gaining (the tug-of-war, #12).
 - The **pounce** arms only after a real sustained vowel-like **hold**, and the
-  catch needs a genuine **stop** (a near-silence gap) — which a continuous
-  scream never produces and a single short shout never reaches. Simply running
-  out of breath and stopping is the generous, expected finale.
+  catch needs a genuine **stop** — a near-silence gap (the lenient
+  run-out-of-breath finale) or, toward strict, the real **«т» burst** — which a
+  continuous scream never produces and a single short shout never reaches.
 
 ### Leniency is mandatory (the whole reason ASR was banned)
 
-These are invariants, not nice-to-haves:
+These are invariants, not nice-to-haves. As of #12 leniency is **assist-scaled**,
+not absolute: lenient at the easy end (the default-safe behavior), a real
+tug-of-war at the strict end — but never a fail screen and never a scold.
 
-1. Genuine voicing **never** yields zero drive — the cat always moves at least
-   `MIN_FLOOR`.
+1. The cat's **forward** drive never yields zero on genuine voicing — it always
+   moves at least `MIN_FLOOR`. At the **easy** end its *net* progress is monotonic
+   too (the mouse never flees), exactly as before; toward the **strict** end the
+   mouse may flee faster than the floor, so the cat can lose ground — but a child
+   always recovers by making the right sounds (the progress can climb straight
+   back). This is the one behaviour #12 made assist-scaled.
 2. **No** negative feedback for a "wrong" sound: no buzzer, no red, no
-   stop-and-scold. The only signal is cat speed.
+   stop-and-scold. The only signal is cat speed — slower, or the mouse pulling
+   ahead, never a punishment.
 3. The per-rung config (`src/game/config.ts`) is the rollback: flip every rung
    off — or flip a single misbehaving one off, live, mid-session — and the game
    reverts to the exact shipped loudness-only engine.
-4. A **строго ↔ легче** (strict ↔ easy) `assist` slider relaxes every threshold
-   continuously — at the easy end it is as forgiving as the old loudness-only
-   feel, for a noisy room or a detector miss. It relaxes the gate; it never
-   silently bypasses it.
+4. The **строго ↔ легче** (strict ↔ easy) `assist` slider is the single difficulty
+   dial. At the easy end it is as forgiving as the old loudness-only feel (no
+   flee, a breath-stop still wins) — for a noisy room, a detector miss, or a child
+   who just needs to vocalize. Toward strict it raises the bar (the mouse flees,
+   the «т» burst is required). It relaxes or tightens the gate continuously; it
+   never silently bypasses it.
 
 There is no timer, no score, no fail state. A child can never lose.
 
@@ -111,34 +131,41 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   rate, spectral flatness / centroid / low-band ratio, the `vowelLikeness`
   blend, (Rung 2, #5) `estimateFormants` + `vowelMatch` — a coarse F1/F2
   estimate scored against the target vowel in the child's own formant space —
-  and (Rung 3, #6) `classifyConsonant` — a coarse stop / sonorant / fricative
-  label over a recent release window. No state, no Web Audio — just
-  `Float32Array` in, number/label out.
+  (Rung 3, #6) `classifyConsonant` — a coarse stop / sonorant / fricative label
+  over a recent release window — and (Rung 3, #12) `detectStopBurst` — the real
+  fast «т» detector, a pure dip→burst shape test over a fast-envelope window. No
+  state, no Web Audio — just `Float32Array` in, number/label out.
 - **`src/audio/AudioEngine.ts`** — mic capture, the loudness envelope, **and**
   the spectral feature layer (gated by `setPhoneticEnabled`, driven from the
   config's "is any rung on?" flag). RMS with
   fast-attack/slow-release smoothing; automatic noise-floor calibration; a
   self-scaling `level`; voiced detection with hysteresis; onset/release edges;
-  per-frame `vowelLikeness` scored against an optional per-child baseline, and
-  (Rung 2) the F1/F2 formant estimate on each frame.
+  per-frame `vowelLikeness` scored against an optional per-child baseline,
+  (Rung 2) the F1/F2 formant estimate, and (Rung 3, #12) a **second, much faster
+  envelope** over the raw RMS feeding `detectStopBurst` → the `stopBurst` frame
+  signal (the «т» closure→burst, invisible to the 120 ms-smoothed path).
   Browser-side AGC, noise suppression and echo cancellation are all **disabled**
   — AGC would flatten the loudness dynamics, and the others gate quiet breathy
   sounds and would corrupt the spectrum. Accepts an injectable analyser so the
   whole chain is testable without a mic.
-- **`src/game/PatternMatcher.ts`** — the hold → gap → stop state machine. Grades
-  chase speed (`driveQuality`), decides when a vowel hold is long enough to arm
-  the pounce, and fires the catch on a genuine stop. With Rung 2 on it folds a
-  bounded vowel-match factor into the speed (a closer vowel runs faster) — but
-  never into the hold or the catch. With Rung 3 on it labels the release
-  (`consonantClass`) and, for a `"stop"` scene, adds an earlier burst-catch on
-  the «т» release (`burstDetected`) — additive only; the gap-only catch still
-  wins. Two thresholds (a lenient "counts as trying" gate + the graded speed)
-  and an `assist` knob keep it forgiving. Pure and deterministic.
-- **`src/game/GameView.ts`** — the canvas chase. Progress accumulates while
-  voiced (and never decays on a pause). With the matcher, speed = `MIN_FLOOR +
-  (1−MIN_FLOOR)·driveQuality` and the catch is gated on a real hold + stop; with
-  the matcher off it is the exact pre-#1 loudness path (`stepPlay(match=null)`).
-  The cat and mouse become friends at the end (hearts, not a kill).
+- **`src/game/PatternMatcher.ts`** — the hold → stop state machine. Grades chase
+  speed (`driveQuality`), decides when a vowel hold is long enough to arm the
+  pounce, and fires the catch on a genuine stop. With Rung 2 on it folds a bounded
+  vowel-match factor into the speed (a closer vowel runs faster; its floor is
+  assist-scaled, #12) — but never into the hold. With Rung 3 on it labels the
+  release (`consonantClass`) and, for a `"stop"` scene, fires the catch on the real
+  `frame.stopBurst` (`burstDetected`). Which stop evidence is required is
+  **assist-scaled** (#12): toward easy a breath-stop gap still wins, toward strict
+  only the «т» burst does. A lenient "counts as trying" gate + the graded speed +
+  the `assist` knob keep it forgiving. Pure and deterministic.
+- **`src/game/GameView.ts`** — the canvas chase. The drive is a tug-of-war (#12):
+  net progress = `catDrive − mouseFlee`, with `mouseFlee = strictness·MOUSE_FLEE_RATE`,
+  clamped to `[0, PRECHASE_CAP]`. At the easy end the mouse never flees and
+  progress is monotonic (today's feel, byte-for-byte); toward strict it can decay
+  to 0. Cat speed = `MIN_FLOOR + (1−MIN_FLOOR)·driveQuality`, the catch gated on a
+  real hold + stop; with the matcher off it is the exact pre-#1 loudness path
+  (`stepPlay(match=null)`, no flee). The cat and mouse become friends at the end
+  (hearts, not a kill).
 - **`src/game/MeterView.ts`** — the "I can hear you" indicator for the mic-check
   screen, so a caregiver can confirm the mic before involving the child. The
   mic-check doubles as the vowel-baseline calibration window.
@@ -148,10 +175,12 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   feed back into the chase).
 - **`src/game/words.ts` / `types.ts`** — the content model. A `WordScene` is the
   unit of content and now carries an `AcousticPattern` (which ladder rung, how
-  long to hold, the required stop gap, an optional target `vowel` for Rung 2, and
-  an optional `release.want: "stop"` for Rung 3 — «кот»/«кит» ask for a real
-  «т»). The chase mechanic is generic, so adding a `[hold]+[stop]` word (дом, кит,
-  …) is just adding data.
+  long to hold, the required stop gap, an optional target `vowel` for Rung 2, an
+  optional `release.want: "stop"` for Rung 3, and the target `release.letter` it
+  teaches — «кот»/«кит» ask for a real «т»). The acoustic trigger is the letter's
+  coarse *class* (a stop burst), never the letter itself (telling «т» from «к»/«п»
+  is the banned ASR territory). The chase mechanic is generic, so adding a
+  `[hold]+[stop]` word (дом, кит, …) is just adding data.
 - **`src/game/config.ts`** — the `PhoneticConfig` single source of truth (issue
   #4): per-rung flags (`rung1`/`rung2`/`rung3`), the `assist` continuum, and a
   `debug` flag, plus a tiny `localStorage`-backed store. The store never throws —
@@ -179,9 +208,11 @@ reload.
 ## Tests
 
 ```bash
-npm test           # vitest: pure DSP, the PatternMatcher state machine,
-                   # an AudioEngine→matcher integration via an injected analyser,
-                   # plus the AC#4 (graded) and AC#5 (kill-switch identity) guards
+npm test           # vitest: pure DSP (incl. the `detectStopBurst` shape test),
+                   # the PatternMatcher state machine, the GameView tug-of-war
+                   # drive, an AudioEngine→matcher integration via an injected
+                   # analyser, plus the AC#1 (easy = byte-for-byte) and AC#5
+                   # (kill-switch identity) guards
 ```
 
 The DSP and the state machine are pure, and `AudioEngine` accepts an injected
@@ -201,19 +232,26 @@ they grade on **Rung 1** (vowel-ish vs noise) and each tags a target `vowel` for
   built — #5, default off) · Rung 3 = consonant class / real «т» stop (built —
   #6, default off) · Rung 4 = syllable. Each new rung is a finer
   `AcousticPattern` + (for ≥2) new features in `PhoneticFeatures.ts`.
-- Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` in `GameView.ts`, the
-  `VOWEL_WEIGHTS` blend in `PhoneticFeatures.ts`, and the per-scene
-  `AcousticPattern` (`minMs`, `requireGapMs`) in `words.ts`.
+- Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` / `MOUSE_FLEE_RATE` in
+  `GameView.ts`, the `VOWEL_WEIGHTS` blend and the `STOP_BURST_*` detector bounds
+  in `PhoneticFeatures.ts`, `BURST_REQUIRED_ASSIST` / `VOWEL_MATCH_FLOOR(_STRICT)`
+  in `PatternMatcher.ts`, and the per-scene `AcousticPattern` (`minMs`,
+  `requireGapMs`) in `words.ts`.
 
 ## Tuning notes
 
 If the cat reacts too eagerly or too sluggishly in a particular room, reach for
-the **строго ↔ легче** slider first (it relaxes every phonetic threshold at
-once). Beyond that, the relevant constants are the noise-floor multipliers in
-`AudioEngine.ts`, the chase constants at the top of `GameView.ts`
-(`MIN_FLOOR`, `CHASE_RATE`, `POUNCE_READY`), and the `VOWEL_WEIGHTS` blend in
-`PhoneticFeatures.ts`. If the spectral layer ever misbehaves on real hardware,
-flip the offending rung off in the ⚙ settings panel (or turn every rung off) to
-revert to the shipped loudness-only engine instantly, mid-session — no reload,
-no rebuild. The mechanic lives or dies on how immediately the cat reacts to the
-child's voice.
+the **строго ↔ легче** slider first (it sets both the mouse's flee speed and how
+strictly the «т» is required). Beyond that, the relevant constants are the
+noise-floor multipliers and the `FAST_ENV_*` time constants in `AudioEngine.ts`,
+the chase constants at the top of `GameView.ts` (`MIN_FLOOR`, `CHASE_RATE`,
+`POUNCE_READY`, `MOUSE_FLEE_RATE`), the `STOP_BURST_*` detector bounds +
+`VOWEL_WEIGHTS` blend in `PhoneticFeatures.ts`, and `BURST_REQUIRED_ASSIST` in
+`PatternMatcher.ts`. The **«т» stop-burst thresholds and the default assist are
+placeholders** — they were chosen to make the mechanic demonstrable in tests and
+**must be set on a real microphone with the child** (turn on `?debug=1`: it shows
+the live `stopBurst`, the net cat-vs-flee drive, and the target letter). If the
+spectral layer ever misbehaves on real hardware, flip the offending rung off in
+the ⚙ settings panel (or turn every rung off) to revert to the shipped
+loudness-only engine instantly, mid-session — no reload, no rebuild. The mechanic
+lives or dies on how immediately the cat reacts to the child's voice.

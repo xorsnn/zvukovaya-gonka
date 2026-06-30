@@ -1,7 +1,7 @@
 import "./style.css";
 import { AudioEngine, type AudioFrame } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
-import { GameView } from "./game/GameView";
+import { GameView, MIN_FLOOR, MOUSE_FLEE_RATE } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { DEFAULT_WORD } from "./game/words";
 import { speakWord } from "./game/sfx";
@@ -357,7 +357,14 @@ function renderDebug(frame: AudioFrame): void {
   const effMin = game.getScene().pattern.sustain.minMs * (1 - config.assist * 0.6);
   const f = (x: number, d = 2) => x.toFixed(d);
   const target = game.getScene().pattern.vowel;
+  const letter = game.getScene().pattern.release.letter;
   const vm = m?.vowelMatch ?? 1;
+  // Live tug-of-war drive (#12): the cat's forward drive vs the mouse's flee, the
+  // same arithmetic GameView.stepPlay nets each frame, so a tuner can watch the
+  // balance tip at a given assist. flee = strictness·MOUSE_FLEE_RATE.
+  const catDrive = m && frame.voiced ? MIN_FLOOR + (1 - MIN_FLOOR) * m.driveQuality : 0;
+  const flee = m ? (1 - config.assist) * MOUSE_FLEE_RATE : 0;
+  const net = catDrive - flee;
   dbgEl.textContent =
     `vowelLike ${f(frame.vowelLikeness)} ${dbgBar(frame.vowelLikeness)}\n` +
     ` flatness ${f(frame.flatness)} ${dbgBar(frame.flatness)}\n` +
@@ -367,7 +374,8 @@ function renderDebug(frame: AudioFrame): void {
     `   F1/F2 ${Math.round(frame.f1)}/${Math.round(frame.f2)} Hz` +
     `${config.rung2 && target ? `  →«${target}» ${f(vm)} ${dbgBar(vm)}` : ""}\n` +
     `    level ${f(frame.level)}  ${frame.voiced ? "●voiced" : "·quiet"}\n` +
-    `${config.rung3 ? `    class ${m?.consonantClass ?? "none"}${m?.burstDetected ? "  BURST✓" : ""}\n` : ""}` +
+    `    drive cat ${f(catDrive)} − flee ${f(flee)} = ${net >= 0 ? "+" : ""}${f(net)}\n` +
+    `${config.rung3 ? `    class ${m?.consonantClass ?? "none"}${letter ? ` →«${letter}»` : ""}${frame.stopBurst ? "  STOP-BURST✓" : ""}${m?.burstDetected ? "  CAUGHT-BURST✓" : ""}\n` : ""}` +
     `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
     `  thr ${f(effHold)}  assist ${f(config.assist, 1)}\n` +
     `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;

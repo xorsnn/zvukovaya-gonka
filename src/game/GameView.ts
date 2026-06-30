@@ -40,26 +40,47 @@ const POUNCE_READY = 0.8; // ...and once this close, any burst/stop catches.
 const CHASE_RATE = 1.0; // progress per second at full loudness
 const MIN_VOICED_DRIVE = 0.25; // (loudness path) any voicing moves the cat ≥ this
 /** (phonetic path) the cat ALWAYS runs at least this fast on genuine voicing —
- * leniency invariant #1. A clearer vowel adds the rest up to full speed. */
+ * the cat's own FORWARD drive never drops below this. Its NET progress, though,
+ * is now assist-scaled (#12): at the strict end the mouse can flee faster than
+ * the floor, so the cat can still lose ground. A clearer vowel adds the rest up
+ * to full speed. */
 export const MIN_FLOOR = 0.15;
 /** (phonetic path) once the vowel hold is satisfied, how fast the cat closes the
- * last of the gap so the pounce always leaps from right behind the mouse. */
+ * last of the gap so the pounce leaps from right behind the mouse. Lives only on
+ * the EASY trajectory (#12): at the strict end the tug-of-war governs instead, so
+ * the sustained right vowel itself has to have driven the cat in. */
 const HOLD_CLOSE_RATE = 3.0;
+/** (phonetic path, #12) how fast the mouse flees, at full strictness, in
+ * progress/sec. The net drive is `catDrive − strictness·MOUSE_FLEE_RATE`. Sits
+ * between a wrong-vowel/silence drive and a right-vowel drive, so at strict the
+ * right vowel gains while a wrong vowel or silence loses. Placeholder pending the
+ * real-mic tuning pass (#12, AC#6) — set with the child, not blind. */
+export const MOUSE_FLEE_RATE = 0.4;
 
 /**
  * One step of the "play" state, factored out as a pure function so the drive +
  * pounce-gating logic is unit-testable without a canvas (node env).
  *
- * - With a `match` (phonetic path): speed = `MIN_FLOOR + (1-MIN_FLOOR)*driveQuality`.
- *   The catch gate is `match.caught` (a real vowel hold + a genuine stop) — NOT
- *   chase proximity, because a 600 ms hold may not have pushed `progress` to
- *   `POUNCE_READY` yet, and `caught` is a one-shot edge. Instead, once the hold
- *   is satisfied the cat surges to `PRECHASE_CAP`, so by the time the stop fires
- *   it is already poised behind the mouse. This is what makes AC#3 reliable.
- * - With `match === null` (no rung enabled, or a scene with no matcher): the
- *   EXACT pre-#1 behavior — speed = `max(MIN_VOICED_DRIVE, level)`, catch on any
- *   `onset || release` once `progress >= POUNCE_READY`. This identity is what
- *   makes the kill-switch a true rollback (AC#5).
+ * Tug-of-war (#12): the cat's speed is `MIN_FLOOR + (1-MIN_FLOOR)·driveQuality`;
+ * the catch gate is `match.caught` (a real vowel hold + a genuine stop/burst), a
+ * one-shot edge. Difficulty is the single `assist` knob, expressed here as
+ * `strictness = 1 - assist`, and implemented as a blend between two trajectories
+ * whose endpoints are BOTH exact:
+ * - the EASY trajectory — today's monotonic drive + the full `HOLD_CLOSE_RATE`
+ *   hold-surge, no flee. At `strictness = 0` the result IS this, byte-for-byte
+ *   (AC#1), and it is also the only path when `match === null` (the kill-switch).
+ * - the STRICT trajectory — net `catDrive − MOUSE_FLEE_RATE`, clamped to
+ *   `[0, PRECHASE_CAP]` and ALLOWED TO DECAY to 0 (the mouse escapes back to the
+ *   start), with NO hold-surge floor, so a wrong vowel or silence lets the mouse
+ *   gain even after the hold and sustained wrong input returns progress to 0 (AC#2).
+ * `progress = lerp(easy, strict, strictness)`, so the slider's middle is a smooth
+ * mix and the catch is gated on the «т» burst by the matcher toward strict (AC#3).
+ *
+ * With `match === null` (no rung enabled, or a scene with no matcher) only the
+ * easy trajectory runs and there is no flee — the EXACT pre-#1 behavior: speed =
+ * `max(MIN_VOICED_DRIVE, level)`, catch on any `onset || release` once
+ * `progress >= POUNCE_READY`. That identity makes the kill-switch a true
+ * rollback (AC#5).
  */
 export interface PlayStep {
   progress: number;
@@ -72,18 +93,44 @@ export function stepPlay(
   dts: number,
   match: MatchState | null,
   inputEnabled: boolean,
+  /** 0 = easy (no flee, monotonic) … 1 = strict (full tug-of-war). Derived from
+   * the matcher's `assist` (`1 - assist`); 0 on the loudness path so AC#5 holds. */
+  strictness = 0,
 ): PlayStep {
   let progress = prev;
-  if (inputEnabled && frame.voiced) {
-    const drive = match
-      ? MIN_FLOOR + (1 - MIN_FLOOR) * match.driveQuality
-      : Math.max(MIN_VOICED_DRIVE, frame.level);
-    progress = Math.min(PRECHASE_CAP, prev + drive * CHASE_RATE * dts);
-  }
-  // Hold satisfied → cat closes in and poises (continues even through the final
-  // silent gap, so the pounce leaps from close regardless of how loud she was).
-  if (match && inputEnabled && match.holdSatisfied) {
-    progress = Math.max(progress, Math.min(PRECHASE_CAP, prev + HOLD_CLOSE_RATE * dts));
+  if (inputEnabled) {
+    const catDrive = frame.voiced
+      ? match
+        ? MIN_FLOOR + (1 - MIN_FLOOR) * match.driveQuality
+        : Math.max(MIN_VOICED_DRIVE, frame.level)
+      : 0; // silence drives nothing — at strict the mouse then nets a gain
+
+    // EASY trajectory: today's monotonic drive + the hold-surge that closes the
+    // cat in and poises it (even through the final silent gap). This is what
+    // strictness=0 yields VERBATIM (AC#1), and the only path on the loudness path
+    // (match=null), so the kill-switch stays byte-for-byte the pre-#1 engine (AC#5).
+    let easyProg = prev;
+    if (frame.voiced) {
+      easyProg = Math.min(PRECHASE_CAP, prev + catDrive * CHASE_RATE * dts);
+    }
+    if (match && match.holdSatisfied) {
+      easyProg = Math.max(easyProg, Math.min(PRECHASE_CAP, prev + HOLD_CLOSE_RATE * dts));
+    }
+
+    if (!match) {
+      progress = easyProg;
+    } else {
+      // STRICT trajectory: net = catDrive − MOUSE_FLEE_RATE, allowed to DECAY to 0
+      // (the mouse escapes back to the start) and with NO hold-surge floor, so
+      // silence/wrong input lets the mouse gain even after the hold (AC#2).
+      const strictProg = Math.max(
+        0,
+        Math.min(PRECHASE_CAP, prev + (catDrive * CHASE_RATE - MOUSE_FLEE_RATE) * dts),
+      );
+      // The one assist knob slides between the two: easy at strictness 0, full
+      // tug-of-war at 1, a smooth blend between. Both endpoints are exact.
+      progress = easyProg + (strictProg - easyProg) * strictness;
+    }
   }
   let pounce = false;
   if (inputEnabled) {
@@ -228,7 +275,10 @@ export class GameView {
         : null;
     this.lastMatch = match;
 
-    const res = stepPlay(this.progress, frame, dts, match, this.inputEnabled);
+    // Strictness (the inverse of the assist slider) sets the mouse's flee speed.
+    // 0 when there's no matcher (loudness path) so AC#5's byte-for-byte holds.
+    const strictness = this.matcher ? 1 - this.matcher.assist : 0;
+    const res = stepPlay(this.progress, frame, dts, match, this.inputEnabled, strictness);
     this.progress = res.progress;
 
     // Cosmetic running animation tracks whether the child is driving the cat.

@@ -10,11 +10,12 @@
  *   - `holdSatisfied` — has the child sustained a vowel-like sound long enough
  *     that the pounce may arm? This is what defeats the "single short shout".
  *   - `caught` — the catch event: fires after a real hold *and* a genuine stop.
- *     The stop is a near-silence gap (`silenceMs >= effGapMs`); with Rung 3 on a
- *     "stop" scene ALSO accepts a «т» burst (a re-onset after a brief closure,
- *     `silenceMs === 0` on that frame) as an additive bonus path. This defeats
- *     the "continuous scream" (no gap) and is the generous "just stop / run out
- *     of breath" finale.
+ *     The stop is a near-silence gap (`silenceMs >= effGapMs`) — the generous
+ *     "just stop / run out of breath" finale — OR, on a Rung-3 "stop" scene, the
+ *     real fast «т» stop-burst (`frame.stopBurst`, #12). Which one is required is
+ *     ASSIST-SCALED (#12): toward the easy end the breath-stop gap still wins;
+ *     toward the strict end it is withdrawn and only a real «т» burst catches.
+ *     Either way the "continuous scream" (no gap, no burst) never catches.
  *
  * LENIENCY BY DESIGN — two thresholds, not one:
  *   - a *lenient* `holdThreshold` decides whether a sound "counts as trying"
@@ -22,9 +23,13 @@
  *   - the *graded* `vowelLikeness` itself sets the speed.
  * So an imperfect-but-real vowel still counts and still moves the cat.
  *
- * The `assist` knob (0..1) relaxes every threshold continuously toward today's
- * loudness-only feel — a safety valve for a noisy room or a detector miss. It
- * relaxes the gate; it never silently bypasses it.
+ * The `assist` knob (0..1) is the single difficulty dial. It relaxes every
+ * threshold continuously toward today's loudness-only feel AND, post-#12, scales
+ * the tug-of-war: at the easy end leniency is preserved (a wrong vowel still
+ * keeps most of its drive, a breath-stop still wins); at the strict end a clearly
+ * wrong vowel can net-negative and the «т» burst is required. It relaxes the
+ * gate; it never silently bypasses it, and there is still no fail state — the
+ * child always recovers by making the right sounds.
  *
  * Pure and deterministic: feed it canned frames in a test, no mic required.
  */
@@ -53,38 +58,35 @@ export const MIN_HOLD_THRESHOLD = 0.4;
 export const RUNG3_WINDOW_FRAMES = 32;
 
 /**
- * Rung 3 (#6): the minimum near-silence (ms) after the hold that counts as a real
- * stop CLOSURE before a fresh onset is read as the «т» burst. Smaller than
- * `release.requireGapMs` so a crisp «т» (a brief closure → a burst) can complete
- * the catch a touch earlier than a plain run-out-of-breath gap — a bonus path,
- * never a gate (the gap-only catch is untouched). This is a *ms* threshold on the
- * engine's `silenceMs`, independent of the classifier's frame-count
- * {@link CONSONANT_GAP_FRAMES}; the two describe the same "closure" idea in
- * different units, so keep them in mind together if you retune one.
- *
- * KNOWN LIMITATION (post-merge review #6; deferred to the real-mic / AC#5 phase):
- * this burst path is effectively INERT on real speech. It keys off `frame.onset`
- * + `frame.silenceMs`, which both derive from the engine's `voiced` flag — and
- * `voiced` has a ~120 ms release time-constant, so after a loud vowel it takes
- * ~387 ms of silence to drop (120·ln(holdRMS/offThreshold)). A natural «т»
- * closure is 50–150 ms, far too short to drop `voiced`, so `sawClosure` never
- * arms and the catch falls back to the final-silence gap (= Rung 1). Making the
- * burst genuinely fire needs a FASTER closure detector (raw/less-smoothed RMS, or
- * a dedicated fast-envelope onset) that does NOT derive from the hysteretic
- * `voiced` flag — a change to validate against a real mic, not tune blind.
+ * Rung 3 (#12): the assist value at/below which a "stop" scene REQUIRES the real
+ * «т» burst to catch — the breath-stop (run-out-of-breath) gap no longer finishes
+ * it. Above this, the gap still wins (today's lenient finale, the default-safe
+ * behavior). The escape hatch is the slider itself: a child not yet ready to
+ * drill the «т» plays at a higher assist and still finishes by simply stopping.
+ * Set so the default (0.5) stays lenient and only the deliberately-strict end
+ * demands the «т». Placeholder pending real-mic tuning (#12, AC#6).
  */
-export const RUNG3_MIN_CLOSURE_MS = 50;
+export const BURST_REQUIRED_ASSIST = 0.3;
 
 /**
- * Rung 2 (#5) leniency bound. A "wrong" vowel still keeps at least this fraction
- * of the vowel-graded drive, so the cat always chases clearly above the
- * GameView `MIN_FLOOR` — the worst case is "a bit slower", never "stalled". A
- * perfect vowel keeps the full drive (factor 1). This is what makes Rung 2
- * *graded, never gated*: identifying the vowel can only ADD speed for a match,
- * it can never punish a real attempt down to nothing. See issue #5's leniency
- * invariants.
+ * Rung 2 (#5) leniency bound, EASY end. At the easy end a "wrong" vowel still
+ * keeps at least this fraction of the vowel-graded drive, so the cat chases
+ * clearly above the GameView `MIN_FLOOR` — "a bit slower", never "stalled". A
+ * perfect vowel keeps the full drive (factor 1).
  */
 export const VOWEL_MATCH_FLOOR = 0.55;
+
+/**
+ * Rung 2 (#12) leniency bound, STRICT end. The wrong-vowel floor is now
+ * ASSIST-SCALED (`lerp(STRICT, EASY, assist)`): at the strict end it drops to
+ * this, so a clearly-wrong vowel's drive can fall far enough that the mouse-flee
+ * (GameView) nets it negative — the tug-of-war the issue calls for. It is still a
+ * positive floor (the cat's own forward drive never hits zero); the regression
+ * comes from the flee, not from a zeroed drive. At the easy/default end the floor
+ * stays {@link VOWEL_MATCH_FLOOR}, preserving Rung-2 leniency. Placeholder pending
+ * real-mic tuning (#12, AC#6).
+ */
+export const VOWEL_MATCH_FLOOR_STRICT = 0.15;
 
 export interface MatchState {
   /** 0..1 chase-speed factor for this frame (graded by vowel-likeness × level). */
@@ -101,8 +103,10 @@ export interface MatchState {
   /** Rung 3 (#6): coarse class of the recent release window ("none" when rung3
    * off / too little signal). For the debug overlay + tests. */
   consonantClass: ConsonantClass;
-  /** Rung 3 (#6): true on the frame a genuine «т» burst (a re-onset after a real
-   * closure) completes the catch — a bonus path, never required. */
+  /** Rung 3 (#12): true on the frame the real fast «т» stop-burst
+   * (`frame.stopBurst`) fires the catch on a "stop" scene. Toward the strict end
+   * this is the ONLY catch path (the breath-stop gap is withdrawn); toward easy it
+   * is an early bonus on top of the gap. For the debug overlay + tests. */
   burstDetected: boolean;
 }
 
@@ -161,13 +165,11 @@ export class PatternMatcher {
   private holdSatisfied = false;
   private done = false;
 
-  /** Rung 3 (#6) rolling release window (voiced + zcr per frame); only filled
-   * when rung3 is on, so the default config allocates nothing here. */
+  /** Rung 3 (#6) rolling release window (voiced + zcr per frame), kept only to
+   * LABEL the consonant class for the debug overlay; only filled when rung3 is on,
+   * so the default config allocates nothing here. The «т» catch itself no longer
+   * derives from this window — it reads the engine's fast `frame.stopBurst` (#12). */
   private recent: ReleaseFrame[] = [];
-  /** Rung 3 (#6): set once a real closure (≥ {@link RUNG3_MIN_CLOSURE_MS} of
-   * near-silence) has followed the satisfied hold, so the next fresh onset reads
-   * as the «т» burst rather than a spurious blip. */
-  private sawClosure = false;
 
   constructor(
     pattern: AcousticPattern,
@@ -199,7 +201,6 @@ export class PatternMatcher {
     this.holdSatisfied = false;
     this.done = false;
     this.recent.length = 0;
-    this.sawClosure = false;
   }
 
   setAssist(assist: number): void {
@@ -231,14 +232,20 @@ export class PatternMatcher {
     const effVowel = lerp(frame.vowelLikeness, 1, this.assist * 0.5);
     const quality = wantVowel ? effVowel : 1; // Rung 0 grades on loudness only.
 
-    // --- Rung 2 (#5): vowel-identity speed factor (graded, NEVER a gate) ---
+    // --- Rung 2 (#5/#12): vowel-identity speed factor (graded, NEVER a hard gate) ---
     // A raw 0..1 closeness to the scene's target vowel, scored in HER formant
-    // space. We only ADD speed for a match: the factor is bounded to
-    // [VOWEL_MATCH_FLOOR, 1], and `assist` lifts the match toward 1 so a high
-    // assist makes vowel identity barely matter (back to the Rung-1 feel). With
-    // rung2 off / no target / no baseline this is exactly 1 → byte-identical
-    // Rung-1 drive (parity, leniency invariant #1). It touches ONLY driveQuality;
-    // the hold and the catch below stay pure Rung-1.
+    // space. `assist` lifts the match toward 1 so a high assist makes vowel
+    // identity barely matter (back to the Rung-1 feel). With rung2 off / no target
+    // / no baseline this is exactly 1 → byte-identical Rung-1 drive (parity,
+    // leniency invariant #1). It touches ONLY driveQuality; the hold and the catch
+    // below stay pure Rung-1.
+    //
+    // The factor's FLOOR is now assist-scaled (#12): at the easy/default end it is
+    // VOWEL_MATCH_FLOOR (a wrong vowel keeps most of its drive — leniency
+    // preserved), but toward the strict end it relaxes to VOWEL_MATCH_FLOOR_STRICT
+    // so a clearly-wrong vowel's drive falls far enough for the GameView
+    // mouse-flee to net it negative (the tug-of-war). At assist=1, effMatch=1 →
+    // vowelFactor=1 regardless of the floor, so easy is still byte-for-byte today.
     const vmatch =
       this.rung2 && this.pattern.vowel
         ? vowelMatch(
@@ -248,7 +255,8 @@ export class PatternMatcher {
           )
         : 1;
     const effMatch = lerp(vmatch, 1, this.assist);
-    const vowelFactor = VOWEL_MATCH_FLOOR + (1 - VOWEL_MATCH_FLOOR) * effMatch;
+    const floor = lerp(VOWEL_MATCH_FLOOR_STRICT, VOWEL_MATCH_FLOOR, this.assist);
+    const vowelFactor = floor + (1 - floor) * effMatch;
 
     const driveQuality = clamp01(quality * frame.level * vowelFactor);
 
@@ -283,29 +291,26 @@ export class PatternMatcher {
       consonantClass = classifyConsonant(this.recent);
     }
 
-    // --- catch: a real hold, then a genuine near-silence stop gap ---
-    // `frame.silenceMs` is continuous near-silence since voicing dropped (the
-    // engine's off-threshold is exactly the "near-silence" gap). A continuous
-    // scream never produces a gap → no catch.
-    //
-    // Rung 3 (#6) + a `"stop"` scene ADD a second, earlier catch path: once a
-    // real closure has followed the satisfied hold, a fresh onset is the «т»
-    // burst and completes the stop crisply. Strictly additive leniency — the
-    // gap-only catch is untouched, so simply running out of breath (no burst)
-    // still wins (leniency invariant #2), and a "wrong"/missing burst never
-    // withholds the catch.
+    // --- catch: a real hold, then a genuine stop (#12, consonant-gated) ---
+    // Two stop evidences, the bar between them scaled by the one `assist` knob:
+    //   • the «т» BURST — the engine's fast `frame.stopBurst` (a real closure→burst
+    //     of 50–150 ms, #12), only on a Rung-3 "stop" scene. Always sufficient.
+    //   • the breath-stop GAP — `frame.silenceMs >= effGapMs`, the generous "ran
+    //     out of breath" finale. A continuous scream never produces a gap → no
+    //     catch, exactly as before.
+    // On a "stop" scene the gap is WITHDRAWN toward the strict end
+    // (assist <= BURST_REQUIRED_ASSIST) so only a real «т» burst wins there (AC#3);
+    // above it (default/easy) the gap still wins (leniency preserved). On a non-«т»
+    // scene (or rung3 off) the gap ALWAYS wins — we never demand a burst a word
+    // lacks, so «дом»/Rung-1 behavior is untouched.
     const rung3Stop = this.rung3 && this.pattern.release.want === "stop";
-    let burstDetected = false;
+    const burstDetected = rung3Stop && frame.stopBurst;
+    const breathStopWins = !rung3Stop || this.assist > BURST_REQUIRED_ASSIST;
+    const gapCatch = breathStopWins && frame.silenceMs >= this.effGapMs;
     let caught = false;
-    if (this.holdSatisfied && !this.done) {
-      if (rung3Stop) {
-        if (frame.silenceMs >= RUNG3_MIN_CLOSURE_MS) this.sawClosure = true;
-        burstDetected = this.sawClosure && frame.onset;
-      }
-      if (frame.silenceMs >= this.effGapMs || burstDetected) {
-        caught = true;
-        this.done = true;
-      }
+    if (this.holdSatisfied && !this.done && (gapCatch || burstDetected)) {
+      caught = true;
+      this.done = true;
     }
 
     return {

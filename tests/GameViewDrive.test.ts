@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { stepPlay } from "../src/game/GameView";
+import { stepPlay, MOUSE_FLEE_RATE } from "../src/game/GameView";
 import { PatternMatcher } from "../src/game/PatternMatcher";
 import type { AcousticPattern } from "../src/game/types";
+import type { MatchState } from "../src/game/PatternMatcher";
 import { makeFrame } from "./_helpers";
 
 const PATTERN: AcousticPattern = {
@@ -87,14 +88,102 @@ describe("USE_PHONETIC kill-switch identity (AC#5)", () => {
       { f: makeFrame({ voiced: true, level: 0.2 }), en: true }, // MIN_VOICED_DRIVE floor
     ];
 
+    // Even with a non-zero strictness argument, match=null forces the easy/loudness
+    // path (no flee) — the kill-switch can't be made harder by the slider.
     let pNew = 0.78; // seeded just below POUNCE_READY so the pounce gate is exercised
     let pOld = 0.78;
     for (const { f, en } of seq) {
-      const a = stepPlay(pNew, f, dts, null, en);
+      const a = stepPlay(pNew, f, dts, null, en, 1 /* strict, but ignored */);
       const b = oldStep(pOld, f, dts, en);
       expect(a).toEqual(b);
       pNew = a.progress;
       pOld = b.progress;
     }
+  });
+});
+
+// --- Tug-of-war drive: the mouse flees, scaled by strictness (#12) -----------
+
+describe("tug-of-war drive (#12)", () => {
+  const DT = 0.016; // s/frame
+  const mk = (p: Partial<MatchState>): MatchState => ({
+    driveQuality: 0,
+    holdSatisfied: false,
+    caught: false,
+    sustainHeldMs: 0,
+    vowelMatch: 1,
+    consonantClass: "none",
+    burstDetected: false,
+    ...p,
+  });
+
+  it("AC#1: at easy (strictness 0) progress NEVER decays — silence holds it", () => {
+    // A right vowel climbs, then silence: with no flee, progress is monotonic
+    // exactly as today (leniency preserved as the easy default).
+    let p = 0;
+    for (let i = 0; i < 20; i++) {
+      p = stepPlay(p, makeFrame({ voiced: true, level: 0.8 }), DT, mk({ driveQuality: 0.7 }), true, 0).progress;
+    }
+    const afterHold = p;
+    expect(afterHold).toBeGreaterThan(0);
+    for (let i = 0; i < 30; i++) {
+      const next = stepPlay(p, makeFrame({ voiced: false }), DT, mk({ driveQuality: 0 }), true, 0).progress;
+      expect(next).toBeGreaterThanOrEqual(p); // never goes backward at easy
+      p = next;
+    }
+    expect(p).toBe(afterHold); // silence at easy is a no-op
+  });
+
+  it("AC#2: at strict (strictness 1) a sustained RIGHT vowel makes the cat gain", () => {
+    let p = 0.2;
+    for (let i = 0; i < 10; i++) {
+      const next = stepPlay(p, makeFrame({ voiced: true, level: 0.9 }), DT, mk({ driveQuality: 0.75 }), true, 1).progress;
+      expect(next).toBeGreaterThan(p); // right vowel out-drives the flee
+      p = next;
+    }
+  });
+
+  it("AC#2: at strict, sustained WRONG input returns progress to 0", () => {
+    // A loud-but-low-quality (wrong) sound: its drive sits below the flee, so the
+    // mouse gains and progress decays all the way to 0 (clamped, never negative).
+    let p = 0.7;
+    for (let i = 0; i < 300; i++) {
+      p = stepPlay(p, makeFrame({ voiced: true, level: 0.5 }), DT, mk({ driveQuality: 0.05 }), true, 1).progress;
+    }
+    expect(p).toBe(0);
+  });
+
+  it("AC#2: at strict, SILENCE makes the mouse gain (progress decays to 0)", () => {
+    let p = 0.6;
+    let everIncreased = false;
+    for (let i = 0; i < 200; i++) {
+      const next = stepPlay(p, makeFrame({ voiced: false }), DT, mk({ driveQuality: 0 }), true, 1).progress;
+      if (next > p) everIncreased = true;
+      p = next;
+    }
+    expect(everIncreased).toBe(false);
+    expect(p).toBe(0); // escaped back to the start, clamped at 0
+  });
+
+  it("AC#2: at strict, the hold-surge no longer floors progress through silence", () => {
+    // holdSatisfied but silent: at easy the surge would pull the cat in; at strict
+    // the mouse is allowed to gain instead, so progress falls.
+    const start = 0.5;
+    const strict = stepPlay(start, makeFrame({ voiced: false }), DT, mk({ holdSatisfied: true }), true, 1).progress;
+    const easy = stepPlay(start, makeFrame({ voiced: false }), DT, mk({ holdSatisfied: true }), true, 0).progress;
+    expect(strict).toBeLessThan(start); // mouse gained
+    expect(easy).toBeGreaterThan(start); // cat closed in (today's surge)
+  });
+
+  it("the flee rate scales continuously with strictness (mid is between the ends)", () => {
+    const f = (s: number) =>
+      stepPlay(0.6, makeFrame({ voiced: false }), DT, mk({ driveQuality: 0 }), true, s).progress;
+    const easy = f(0);
+    const mid = f(0.5);
+    const strict = f(1);
+    expect(easy).toBe(0.6); // no flee
+    expect(strict).toBeCloseTo(0.6 - MOUSE_FLEE_RATE * DT, 6); // full flee
+    expect(mid).toBeGreaterThan(strict);
+    expect(mid).toBeLessThan(easy); // a real, partial tug-of-war in between
   });
 });
