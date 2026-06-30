@@ -1,5 +1,6 @@
 /**
- * PatternMatcher — the hold → gap → stop shape state machine (issue #1, Rung 0/1).
+ * PatternMatcher — the hold → gap → stop shape state machine (issue #1; now also
+ * carries Rung 2 vowel identity (#5) and Rung 3 consonant class (#6)).
  *
  * It turns a stream of {@link AudioFrame}s into three things the chase needs:
  *   - `driveQuality` 0..1 — how fast the cat should run *right now* (graded by
@@ -8,9 +9,12 @@
  *     sound still drives.
  *   - `holdSatisfied` — has the child sustained a vowel-like sound long enough
  *     that the pounce may arm? This is what defeats the "single short shout".
- *   - `caught` — the catch event: fires only after a real hold *and* a genuine
- *     stop (a near-silence gap). This is what defeats the "continuous scream"
- *     (no gap) and is the generous "just stop / run out of breath" finale.
+ *   - `caught` — the catch event: fires after a real hold *and* a genuine stop.
+ *     The stop is a near-silence gap (`silenceMs >= effGapMs`); with Rung 3 on a
+ *     "stop" scene ALSO accepts a «т» burst (a re-onset after a brief closure,
+ *     `silenceMs === 0` on that frame) as an additive bonus path. This defeats
+ *     the "continuous scream" (no gap) and is the generous "just stop / run out
+ *     of breath" finale.
  *
  * LENIENCY BY DESIGN — two thresholds, not one:
  *   - a *lenient* `holdThreshold` decides whether a sound "counts as trying"
@@ -53,7 +57,21 @@ export const RUNG3_WINDOW_FRAMES = 32;
  * stop CLOSURE before a fresh onset is read as the «т» burst. Smaller than
  * `release.requireGapMs` so a crisp «т» (a brief closure → a burst) can complete
  * the catch a touch earlier than a plain run-out-of-breath gap — a bonus path,
- * never a gate (the gap-only catch is untouched).
+ * never a gate (the gap-only catch is untouched). This is a *ms* threshold on the
+ * engine's `silenceMs`, independent of the classifier's frame-count
+ * {@link CONSONANT_GAP_FRAMES}; the two describe the same "closure" idea in
+ * different units, so keep them in mind together if you retune one.
+ *
+ * KNOWN LIMITATION (post-merge review #6; deferred to the real-mic / AC#5 phase):
+ * this burst path is effectively INERT on real speech. It keys off `frame.onset`
+ * + `frame.silenceMs`, which both derive from the engine's `voiced` flag — and
+ * `voiced` has a ~120 ms release time-constant, so after a loud vowel it takes
+ * ~387 ms of silence to drop (120·ln(holdRMS/offThreshold)). A natural «т»
+ * closure is 50–150 ms, far too short to drop `voiced`, so `sawClosure` never
+ * arms and the catch falls back to the final-silence gap (= Rung 1). Making the
+ * burst genuinely fire needs a FASTER closure detector (raw/less-smoothed RMS, or
+ * a dedicated fast-envelope onset) that does NOT derive from the hysteretic
+ * `voiced` flag — a change to validate against a real mic, not tune blind.
  */
 export const RUNG3_MIN_CLOSURE_MS = 50;
 

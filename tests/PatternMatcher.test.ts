@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { PatternMatcher, VOWEL_MATCH_FLOOR } from "../src/game/PatternMatcher";
+import {
+  PatternMatcher,
+  VOWEL_MATCH_FLOOR,
+  RUNG3_MIN_CLOSURE_MS,
+} from "../src/game/PatternMatcher";
 import type { AcousticPattern } from "../src/game/types";
 import { makeFrame } from "./_helpers";
 
@@ -323,5 +327,66 @@ describe("PatternMatcher — Rung 3 stop (#6)", () => {
       if (r.caught) caught++;
     }
     expect(caught).toBe(1);
+  });
+
+  it("rung3 ON but a non-stop ('any') scene adds NO burst-catch — only labels", () => {
+    // PATTERN.release.want is undefined → "any", so `rung3Stop` is false and the
+    // burst path must stay disabled even with rung3 on. Guards the `want === "stop"`
+    // half of the rung3Stop check: dropping it would arm burst-catch on every
+    // word and silently change non-«т» finales.
+    const m = new PatternMatcher(PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // would arm on a stop scene
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.burstDetected).toBe(false); // no burst path on an "any" scene
+    expect(r.caught).toBe(false); // and the 0 ms gap can't catch either
+    expect(r.consonantClass).not.toBe("none"); // but rung3 still labels the window
+  });
+
+  it("a re-onset after a too-short closure (< MIN_CLOSURE) does NOT burst-catch", () => {
+    // The "no-fire" half of arming: with rung3 ON and a closure below
+    // RUNG3_MIN_CLOSURE_MS, `sawClosure` stays false so a following onset is not a
+    // burst. (AC#4 only exercises the OFF case, where the whole block is dead.)
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    m.update(makeFrame({ voiced: false, silenceMs: 32 }), DT); // < 50 → never arms
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.burstDetected).toBe(false);
+    expect(r.caught).toBe(false);
+  });
+
+  it("arms the burst at exactly RUNG3_MIN_CLOSURE_MS (the `>=` boundary)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    m.update(makeFrame({ voiced: false, silenceMs: RUNG3_MIN_CLOSURE_MS }), DT); // exactly 50 → arms
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.burstDetected).toBe(true);
+    expect(r.caught).toBe(true);
+  });
+
+  it("the burst-catch is edge-triggered exactly once (done latches)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // arm
+    let caught = 0;
+    for (let i = 0; i < 6; i++) {
+      // first frame bursts; the rest must NOT re-fire the catch
+      const r = m.update(makeFrame({ voiced: true, onset: i === 0, silenceMs: 0 }), DT);
+      if (r.caught) caught++;
+    }
+    expect(caught).toBe(1);
+  });
+
+  it("reset() clears the Rung-3 release window and arm state between rounds", () => {
+    // GameView.reset() calls matcher.reset() each round; a stale `sawClosure` or
+    // `recent` must not leak a spurious burst-catch into the next round.
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // arms sawClosure
+    m.reset();
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.consonantClass).toBe("none"); // window emptied (1 frame < minVoiced)
+    expect(r.burstDetected).toBe(false); // sawClosure cleared
+    expect(r.caught).toBe(false); // hold reset too → nothing to catch
   });
 });
