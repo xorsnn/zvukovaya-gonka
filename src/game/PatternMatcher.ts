@@ -26,7 +26,13 @@
  */
 
 import type { AudioFrame } from "../audio/AudioEngine";
-import { vowelMatch, type VowelBaseline } from "../audio/PhoneticFeatures";
+import {
+  vowelMatch,
+  classifyConsonant,
+  type VowelBaseline,
+  type ConsonantClass,
+  type ReleaseFrame,
+} from "../audio/PhoneticFeatures";
 import type { AcousticPattern } from "./types";
 
 /** A flicker shorter than this does not reset an in-progress hold. */
@@ -34,6 +40,22 @@ export const DROPOUT_GRACE_MS = 150;
 
 /** Lower bound for the hold threshold even after baseline calibration. */
 export const MIN_HOLD_THRESHOLD = 0.4;
+
+/**
+ * Rung 3 (#6): how many recent frames the consonant-class window keeps (~0.5 s
+ * at 60 fps) — enough to see a sustained hold *and* the closure that follows it.
+ * Only maintained when rung3 is on, so the default config allocates nothing.
+ */
+export const RUNG3_WINDOW_FRAMES = 32;
+
+/**
+ * Rung 3 (#6): the minimum near-silence (ms) after the hold that counts as a real
+ * stop CLOSURE before a fresh onset is read as the «т» burst. Smaller than
+ * `release.requireGapMs` so a crisp «т» (a brief closure → a burst) can complete
+ * the catch a touch earlier than a plain run-out-of-breath gap — a bonus path,
+ * never a gate (the gap-only catch is untouched).
+ */
+export const RUNG3_MIN_CLOSURE_MS = 50;
 
 /**
  * Rung 2 (#5) leniency bound. A "wrong" vowel still keeps at least this fraction
@@ -58,6 +80,12 @@ export interface MatchState {
   /** Rung 2 (#5): raw 0..1 closeness to the scene's target vowel (1 = no opinion,
    * i.e. rung2 off / no target / no baseline). For the debug overlay + tests. */
   vowelMatch: number;
+  /** Rung 3 (#6): coarse class of the recent release window ("none" when rung3
+   * off / too little signal). For the debug overlay + tests. */
+  consonantClass: ConsonantClass;
+  /** Rung 3 (#6): true on the frame a genuine «т» burst (a re-onset after a real
+   * closure) completes the catch — a bonus path, never required. */
+  burstDetected: boolean;
 }
 
 function clamp01(x: number): number {
@@ -100,10 +128,28 @@ export class PatternMatcher {
    * space, not absolute Hz. Null → Rung 2 stays neutral (no penalty). */
   private vowelBaseline: VowelBaseline | null;
 
+  /**
+   * Whether Rung 3 (consonant class / a real «т» stop, #6) grades this round.
+   * Default OFF, so a matcher built without it behaves exactly as the shipped
+   * Rung-1/2 matcher (parity, leniency invariant #1). When on, it maintains a
+   * small release window to LABEL the consonant class, and — for a scene whose
+   * release asks for a `"stop"` — ADDS an earlier burst-catch path. It never
+   * touches the hold, the drive, or the gap-only catch.
+   */
+  private rung3: boolean;
+
   private sustainHeldMs = 0;
   private dropoutMs = 0;
   private holdSatisfied = false;
   private done = false;
+
+  /** Rung 3 (#6) rolling release window (voiced + zcr per frame); only filled
+   * when rung3 is on, so the default config allocates nothing here. */
+  private recent: ReleaseFrame[] = [];
+  /** Rung 3 (#6): set once a real closure (≥ {@link RUNG3_MIN_CLOSURE_MS} of
+   * near-silence) has followed the satisfied hold, so the next fresh onset reads
+   * as the «т» burst rather than a spurious blip. */
+  private sawClosure = false;
 
   constructor(
     pattern: AcousticPattern,
@@ -112,6 +158,7 @@ export class PatternMatcher {
       holdThreshold?: number;
       rung1?: boolean;
       rung2?: boolean;
+      rung3?: boolean;
       vowelBaseline?: VowelBaseline | null;
     },
   ) {
@@ -123,6 +170,7 @@ export class PatternMatcher {
     );
     this.rung1 = opts?.rung1 ?? true;
     this.rung2 = opts?.rung2 ?? false;
+    this.rung3 = opts?.rung3 ?? false;
     this.vowelBaseline = opts?.vowelBaseline ?? null;
   }
 
@@ -132,6 +180,8 @@ export class PatternMatcher {
     this.dropoutMs = 0;
     this.holdSatisfied = false;
     this.done = false;
+    this.recent.length = 0;
+    this.sawClosure = false;
   }
 
   setAssist(assist: number): void {
@@ -205,15 +255,39 @@ export class PatternMatcher {
       this.holdSatisfied = true;
     }
 
+    // --- Rung 3 (#6): release window + consonant-class label (additive) ---
+    // Filled only when rung3 is on (parity + zero cost otherwise). The label
+    // feeds the debug overlay and the burst highlight; it gates nothing.
+    let consonantClass: ConsonantClass = "none";
+    if (this.rung3) {
+      this.recent.push({ voiced: frame.voiced, zcr: frame.zcr });
+      if (this.recent.length > RUNG3_WINDOW_FRAMES) this.recent.shift();
+      consonantClass = classifyConsonant(this.recent);
+    }
+
     // --- catch: a real hold, then a genuine near-silence stop gap ---
     // `frame.silenceMs` is continuous near-silence since voicing dropped (the
-    // engine's off-threshold is exactly the "near-silence" gap). A burst-after-
-    // gap "Т" is subsumed: the stop closure produces the gap first, so the catch
-    // fires on the closure. A continuous scream never produces a gap → no catch.
+    // engine's off-threshold is exactly the "near-silence" gap). A continuous
+    // scream never produces a gap → no catch.
+    //
+    // Rung 3 (#6) + a `"stop"` scene ADD a second, earlier catch path: once a
+    // real closure has followed the satisfied hold, a fresh onset is the «т»
+    // burst and completes the stop crisply. Strictly additive leniency — the
+    // gap-only catch is untouched, so simply running out of breath (no burst)
+    // still wins (leniency invariant #2), and a "wrong"/missing burst never
+    // withholds the catch.
+    const rung3Stop = this.rung3 && this.pattern.release.want === "stop";
+    let burstDetected = false;
     let caught = false;
-    if (this.holdSatisfied && !this.done && frame.silenceMs >= this.effGapMs) {
-      caught = true;
-      this.done = true;
+    if (this.holdSatisfied && !this.done) {
+      if (rung3Stop) {
+        if (frame.silenceMs >= RUNG3_MIN_CLOSURE_MS) this.sawClosure = true;
+        burstDetected = this.sawClosure && frame.onset;
+      }
+      if (frame.silenceMs >= this.effGapMs || burstDetected) {
+        caught = true;
+        this.done = true;
+      }
     }
 
     return {
@@ -222,6 +296,8 @@ export class PatternMatcher {
       caught,
       sustainHeldMs: this.sustainHeldMs,
       vowelMatch: vmatch,
+      consonantClass,
+      burstDetected,
     };
   }
 }

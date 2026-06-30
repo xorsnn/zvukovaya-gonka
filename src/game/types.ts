@@ -31,6 +31,15 @@ export interface AcousticPattern {
   release: {
     /** Required near-silence gap (ms) after the hold to fire the catch. */
     requireGapMs: number;
+    /**
+     * Rung 3 (#6): what the final action should be. `"stop"` asks for a genuine
+     * stop consonant («кот»/«кит» → «т»: a closure, optionally a burst);
+     * `"any"` (the default when absent) keeps today's behavior — any near-silence
+     * gap finalizes the catch. ADDITIVE: only consulted when `config.rung3` is
+     * on, and even then it only *adds* an earlier burst-catch path — it never
+     * blocks the gap-only catch (simply running out of breath still wins).
+     */
+    want?: "stop" | "any";
   };
   /**
    * Rung 2 (#5): the nucleus vowel this scene asks for (кот → «о», кит → «и»).

@@ -214,3 +214,114 @@ describe("PatternMatcher — Rung 2 vowel identity (#5)", () => {
     expect(r.driveQuality).toBeGreaterThanOrEqual(VOWEL_MATCH_FLOOR * quality - 1e-9);
   });
 });
+
+// --- Rung 3 (#6): consonant class & the real «т» stop ----------------------
+
+// «кот»: a vowel hold then a genuine «т» stop. Same shape as PATTERN, but the
+// release asks for a stop, which is what unlocks Rung 3's burst-catch.
+const STOP_PATTERN: AcousticPattern = {
+  ...PATTERN,
+  release: { requireGapMs: 120, want: "stop" },
+};
+const HOLD = { voiced: true, level: 0.8, vowelLikeness: 0.85, zcr: 0.03 };
+
+describe("PatternMatcher — Rung 3 stop (#6)", () => {
+  it("AC#4: rung3 OFF → no consonant label and no early burst-catch (parity)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0 }); // rung3 defaults off
+    const held = feed(m, 45, HOLD);
+    expect(held.holdSatisfied).toBe(true);
+    expect(held.consonantClass).toBe("none");
+    expect(held.burstDetected).toBe(false);
+    // A brief closure (< full gap) then a burst onset must NOT catch with rung3
+    // off — only the plain gap path exists, exactly like today.
+    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT);
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.caught).toBe(false);
+    expect(r.burstDetected).toBe(false);
+  });
+
+  it("AC#2: a lone «т» (short, noisy) never arms or catches, even on a stop scene", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    // ~96 ms of a brief noisy burst — neither long enough nor vowel-like.
+    let satEver = false;
+    let caughtEver = false;
+    for (let i = 0; i < 6; i++) {
+      const r = m.update(makeFrame({ voiced: true, level: 0.7, vowelLikeness: 0.1, zcr: 0.45 }), DT);
+      if (r.holdSatisfied) satEver = true;
+      if (r.caught) caughtEver = true;
+    }
+    for (let i = 0; i < 12; i++) {
+      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
+      if (r.caught) caughtEver = true;
+    }
+    expect(satEver).toBe(false); // the hold is never satisfied by a lone «т»
+    expect(caughtEver).toBe(false);
+  });
+
+  it("AC#3 / leniency #2: a held vowel then just running out of breath still catches", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    const held = feed(m, 45, HOLD);
+    expect(held.holdSatisfied).toBe(true);
+    // Gap only — no burst. The closure alone must still finish the catch.
+    let caught = 0;
+    let burstSeen = false;
+    for (let i = 0; i < 12; i++) {
+      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
+      if (r.caught) caught++;
+      if (r.burstDetected) burstSeen = true;
+    }
+    expect(caught).toBe(1); // gap-only still wins (leniency)
+    expect(burstSeen).toBe(false); // and it was NOT via a burst
+  });
+
+  it("a crisp «т» (closure then a burst) catches on the burst — a bonus path", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    // A brief closure under the full gap, so only the burst can fire the catch.
+    m.update(makeFrame({ voiced: false, silenceMs: 32 }), DT); // < MIN_CLOSURE, no arm
+    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // ≥ MIN_CLOSURE → armed
+    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    expect(r.burstDetected).toBe(true);
+    expect(r.caught).toBe(true); // the «т» release completed the stop early
+  });
+
+  it("AC#3: a continuous «р» hum (no stop) holds but NEVER catches", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    let satEver = false;
+    let caughtEver = false;
+    let last = m.update(makeFrame(HOLD), DT);
+    for (let i = 0; i < 150; i++) {
+      last = m.update(makeFrame({ ...HOLD, silenceMs: 0 }), DT);
+      if (last.holdSatisfied) satEver = true;
+      if (last.caught) caughtEver = true;
+    }
+    expect(satEver).toBe(true); // a sustained hum reads vowel-like → it holds
+    expect(caughtEver).toBe(false); // but with no closure it never catches
+    expect(last.consonantClass).toBe("sonorant"); // and it's labelled a hum
+  });
+
+  it("labels the release: a hold reads 'sonorant', a hold+closure reads 'stop'", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    const held = feed(m, 45, HOLD);
+    expect(held.consonantClass).toBe("sonorant"); // sustained voiced, no gap yet
+    let last = held;
+    for (let i = 0; i < 10; i++) {
+      last = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
+    }
+    expect(last.consonantClass).toBe("stop"); // the closure makes it a stop
+  });
+
+  it("a 'wrong' consonant class never blocks the catch (graded, never gated)", () => {
+    // Even if the hold tail were hiss-y (the classifier might say 'fricative'),
+    // the gap-only catch still fires — Rung 3 only ADDS a burst path, it never
+    // withholds the catch from a real hold + stop.
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, { voiced: true, level: 0.8, vowelLikeness: 0.85, zcr: 0.4 });
+    let caught = 0;
+    for (let i = 0; i < 12; i++) {
+      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
+      if (r.caught) caught++;
+    }
+    expect(caught).toBe(1);
+  });
+});

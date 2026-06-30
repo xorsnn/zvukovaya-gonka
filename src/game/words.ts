@@ -10,12 +10,18 @@ import type { Vowel } from "../audio/PhoneticFeatures";
  * `vowel` tags the nucleus for Rung 2 (#5). It is purely additive: with rung2
  * off the pattern behaves exactly as the shipped Rung-1 shape; with rung2 on it
  * only *grades* speed toward that vowel, never gating the hold or the catch.
+ *
+ * `want` tags the final action for Rung 3 (#6): «т»-final words ask for a genuine
+ * `"stop"` (a closure, optionally a burst); the default `"any"` is today's
+ * "any near-silence gap" finale. Also additive: with rung3 off the release is
+ * exactly the Rung-1 gap, and even with it on a "stop" only *adds* an earlier
+ * burst-catch — running out of breath still finishes the catch.
  */
-function holdStop(vowel: Vowel): AcousticPattern {
+function holdStop(vowel: Vowel, want: "stop" | "any" = "any"): AcousticPattern {
   return {
     rung: 1,
     sustain: { minMs: 600, want: "vowel" },
-    release: { requireGapMs: 120 },
+    release: { requireGapMs: 120, want },
     vowel,
   };
 }
@@ -38,7 +44,7 @@ export const WORDS: WordScene[] = [
     chaser: "🐱",
     fleer: "🐭",
     theme: "meadow",
-    pattern: holdStop("о"),
+    pattern: holdStop("о", "stop"), // «кот» finishes on a real «т» stop (Rung 3)
   },
   // --- ready for later (not surfaced in the MVP flow yet) ---
   {
@@ -65,7 +71,7 @@ export const WORDS: WordScene[] = [
     chaser: "🐳",
     fleer: "🐟",
     theme: "meadow",
-    pattern: holdStop("и"),
+    pattern: holdStop("и", "stop"), // «кит» also ends on a «т» stop (Rung 3)
   },
 ];
 

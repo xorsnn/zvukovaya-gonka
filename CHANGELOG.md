@@ -4,6 +4,49 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.5.0] - 2026-06-30
+
+Rung 3 of the phonetic ladder — coarse consonant class & the real «т» stop
+(issue #6). The chase can now tell the *release shape* apart: a **stop** («т»: a
+sustained hold → a near-silence closure, optionally a burst), a **sonorant**
+hum («р»/«м»: continuous low-ZCR voicing, no gap), and a **fricative** hiss
+(«ш»/«с»: high-ZCR throughout, already low `vowelLikeness` in Rung 1). For a
+«т»-final scene it adds an earlier, crisper burst-catch on the «т» release.
+**Additive and lenient**: ships behind `config.rung3`, **off by default** until
+tuned on the real mic; with it off, behavior is byte-identical to Rung 1/2. Even
+with it on it only *labels* and *adds* a catch path — a genuine vowel hold + a
+stop always catches, so simply running out of breath (no crisp burst) still wins,
+and a lone «т» or a continuous «р» hum is never enough on its own.
+
+### Added
+- `src/audio/PhoneticFeatures.ts` — `classifyConsonant(frames)`: a pure,
+  unit-tested classifier over a recent release window (`ReleaseFrame` =
+  `voiced` + `zcr`) that labels the shape **stop / sonorant / fricative / none**
+  by run-length analysis — no new heavy DSP. Plus the `ConsonantClass` type and
+  the `CONSONANT_*` tuning constants.
+- `AcousticPattern.release.want?: "stop" | "any"` — a scene's final action;
+  «кот»/«кит» ask for a `"stop"`, the default `"any"` keeps today's
+  any-gap finale. Tagged in `words.ts`.
+- `PatternMatcher` `rung3` option: a small rolling release window driving a live
+  `MatchState.consonantClass` label, and — for a `"stop"` scene — an **additive
+  burst-catch** (`MatchState.burstDetected`): once a real closure
+  (`RUNG3_MIN_CLOSURE_MS`) has followed the satisfied hold, a fresh onset
+  completes the «т» stop a touch earlier than the plain gap. The gap-only catch,
+  the hold, and the drive are all untouched (leniency).
+- The `?debug` overlay shows the live consonant class + a `BURST✓` flag when
+  rung3 is on; the matcher is wired to `config.rung3` in `main.ts`.
+- Tests: `classifyConsonant` on canned envelopes (stop / sonorant / fricative /
+  none, all separable), a lone-«т» regression (never arms the hold), Rung-3
+  parity (off → no label, no early catch), and real-engine «ко-о-о(-т)»
+  scenarios (gap-only and hold→closure→burst both catch; a continuous hum holds
+  but never catches). Suite grows 65 → 83.
+
+### Unchanged (leniency invariants)
+- `config.rung3` off → exact Rung-1/2 behavior (catch on any near-silence gap).
+- Rung 3 never blocks the catch on a real hold + stop; the burst is a bonus.
+- No negative feedback for a "wrong" consonant; only the cat's speed / the pounce.
+- `assist → 1` relaxes the stop gap back toward "any gap counts" (via `effGapMs`).
+
 ## [0.4.0] - 2026-06-30
 
 Rung 2 of the phonetic ladder — coarse vowel identity (issue #5). The cat can

@@ -172,7 +172,8 @@ function finalizeCalibration(): void {
  * (Re)build the matcher for the current scene; null when no rung is enabled (the
  * loudness-only path). `rung1` gates the vowel grading inside the matcher;
  * `rung2` adds the vowel-identity speed factor (#5), scored against her
- * calibrated formant baseline; rung 3 is a no-op until #6 layers on top.
+ * calibrated formant baseline; `rung3` adds the consonant-class label + the
+ * real-«т» stop's bonus burst-catch (#6) for a scene whose release wants a stop.
  */
 function buildMatcher(): void {
   if (!anyRungOn(config)) {
@@ -185,6 +186,7 @@ function buildMatcher(): void {
     holdThreshold: calibHoldThreshold,
     rung1: config.rung1,
     rung2: config.rung2,
+    rung3: config.rung3,
     vowelBaseline: audio.getVowelBaseline(),
   });
   game.setMatcher(matcher);
@@ -365,6 +367,7 @@ function renderDebug(frame: AudioFrame): void {
     `   F1/F2 ${Math.round(frame.f1)}/${Math.round(frame.f2)} Hz` +
     `${config.rung2 && target ? `  →«${target}» ${f(vm)} ${dbgBar(vm)}` : ""}\n` +
     `    level ${f(frame.level)}  ${frame.voiced ? "●voiced" : "·quiet"}\n` +
+    `${config.rung3 ? `    class ${m?.consonantClass ?? "none"}${m?.burstDetected ? "  BURST✓" : ""}\n` : ""}` +
     `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
     `  thr ${f(effHold)}  assist ${f(config.assist, 1)}\n` +
     `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;
