@@ -33,6 +33,7 @@ import {
   lowBandRatio as lowBandRatioOf,
   zeroCrossingRate,
   vowelLikeness,
+  estimateFormants,
   type VowelBaseline,
 } from "./PhoneticFeatures";
 
@@ -78,6 +79,10 @@ export interface AudioFrame {
   zcr: number;
   /** Blended 0..1 "how vowel-like is this sound" — the score the game grades on. */
   vowelLikeness: number;
+  /** First formant estimate in Hz (Rung 2, #5); 0 when off or silent. */
+  f1: number;
+  /** Second formant estimate in Hz (Rung 2, #5); 0 when off or silent. */
+  f2: number;
 }
 
 export type MicStatus =
@@ -97,6 +102,9 @@ export class AudioEngine {
   private buf: Float32Array<ArrayBuffer> = new Float32Array(0);
   private freqDb: Float32Array<ArrayBuffer> = new Float32Array(0);
   private mag: Float32Array<ArrayBuffer> = new Float32Array(0);
+  // Reusable scratch for the formant envelope, so estimateFormants allocates
+  // nothing per frame (matches how mag/freqDb/buf are reused). See Rung 2 (#5).
+  private formantEnv: Float32Array<ArrayBuffer> = new Float32Array(0);
   private sampleRate = 44100;
 
   // Optional per-child vowel baseline (from the mic-check calibration) so a
@@ -108,6 +116,13 @@ export class AudioEngine {
   // USE_PHONETIC kill-switch. Defaults on so a directly-constructed engine
   // (e.g. tests) keeps the Increment-1 behavior without extra wiring.
   private phoneticEnabled = true;
+
+  // Whether to estimate F1/F2 (Rung 2, #5). Gated separately from the rest of the
+  // spectral layer because the formant pass is ONLY consumed when rung2 grades a
+  // scene; in the shipped default (rung2 off) computing it every frame would be
+  // pure waste. Defaults on so a directly-constructed engine (tests) still emits
+  // f1/f2 without extra wiring; the host narrows it to `config.rung2`.
+  private rung2Enabled = true;
 
   // Smoothed RMS with asymmetric attack/release so the meter snaps up fast but
   // settles down gently (feels alive, not jittery).
@@ -157,6 +172,7 @@ export class AudioEngine {
     this.buf = new Float32Array(analyser.fftSize);
     this.freqDb = new Float32Array(analyser.frequencyBinCount);
     this.mag = new Float32Array(analyser.frequencyBinCount);
+    this.formantEnv = new Float32Array(analyser.frequencyBinCount);
   }
 
   /**
@@ -235,6 +251,12 @@ export class AudioEngine {
     this.vowelBaseline = baseline;
   }
 
+  /** The current per-child vowel baseline (centroid + optional F1/F2), so the
+   * host can hand it to the matcher for Rung-2 vowel-match scoring (#5). */
+  getVowelBaseline(): VowelBaseline | null {
+    return this.vowelBaseline;
+  }
+
   /**
    * Enable/disable the spectral (phonetic) layer. The host passes
    * `anyRungOn(config)` (issue #4): when disabled, `sample()` skips all spectral
@@ -243,6 +265,15 @@ export class AudioEngine {
    */
   setPhoneticEnabled(enabled: boolean): void {
     this.phoneticEnabled = enabled;
+  }
+
+  /**
+   * Enable/disable the per-frame F1/F2 formant estimate (Rung 2, #5). The host
+   * passes `config.rung2`: off → `sample()` skips the formant pass entirely and
+   * `f1/f2` stay 0, so the default config pays nothing for a disabled feature.
+   */
+  setRung2Enabled(enabled: boolean): void {
+    this.rung2Enabled = enabled;
   }
 
   /**
@@ -333,6 +364,8 @@ export class AudioEngine {
     let lowBand = 0;
     let zcr = 0;
     let vl = 0;
+    let f1 = 0;
+    let f2 = 0;
     if (this.phoneticEnabled) {
       this.analyser.getFloatFrequencyData(this.freqDb);
       // AnalyserNode hands back dB; convert once to linear magnitude. Empty bins
@@ -348,6 +381,15 @@ export class AudioEngine {
         { flatness, centroid, lowBandRatio: lowBand, zcr },
         this.vowelBaseline,
       );
+      // Coarse F1/F2 for Rung 2 (#5), only when a consumer exists. Reuses the
+      // shared envelope scratch so the hot path allocates nothing per frame.
+      if (this.rung2Enabled) {
+        ({ f1, f2 } = estimateFormants(
+          this.mag,
+          this.sampleRate,
+          this.formantEnv,
+        ));
+      }
     }
 
     return {
@@ -364,6 +406,8 @@ export class AudioEngine {
       lowBandRatio: lowBand,
       zcr,
       vowelLikeness: vl,
+      f1,
+      f2,
     };
   }
 
@@ -383,6 +427,8 @@ export class AudioEngine {
       lowBandRatio: 0,
       zcr: 0,
       vowelLikeness: 0,
+      f1: 0,
+      f2: 0,
     };
   }
 

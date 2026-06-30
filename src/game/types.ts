@@ -6,6 +6,8 @@
  *
  * Add a scene = add a data object. No new code required for more chase words.
  */
+import type { Vowel } from "../audio/PhoneticFeatures";
+
 export type SceneType = "chase";
 
 /**
@@ -30,6 +32,13 @@ export interface AcousticPattern {
     /** Required near-silence gap (ms) after the hold to fire the catch. */
     requireGapMs: number;
   };
+  /**
+   * Rung 2 (#5): the nucleus vowel this scene asks for (кот → «о», кит → «и»).
+   * Optional and ADDITIVE — only consulted when `config.rung2` is on, and even
+   * then it only *grades* chase speed (a closer vowel runs faster); it never
+   * gates the hold or the catch. Absent → no vowel-identity grading.
+   */
+  vowel?: Vowel;
 }
 
 export interface WordScene {
