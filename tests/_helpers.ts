@@ -21,6 +21,8 @@ export function makeFrame(p: Partial<AudioFrame> = {}): AudioFrame {
     lowBandRatio: 0,
     zcr: 0,
     vowelLikeness: 0,
+    f1: 0,
+    f2: 0,
     ...p,
   };
 }
@@ -61,6 +63,32 @@ export function flatSpectrumDb(db: number, n = 512): Float32Array {
 /** Effectively-silent spectrum. */
 export function silentSpectrumDb(n = 512): Float32Array {
   return new Float32Array(n).fill(-140);
+}
+
+/**
+ * A vowel-shaped dB spectrum: two broad formant lobes at f1Hz / f2Hz over a
+ * faint floor. Round-trips through the engine's dB→linear conversion so
+ * `estimateFormants` recovers ~f1/f2 (Rung 2, #5).
+ */
+export function vowelSpectrumDb(
+  f1Hz: number,
+  f2Hz: number,
+  sr = 44100,
+  n = 512,
+): Float32Array {
+  const hzPerBin = sr / 2 / n;
+  const b1 = f1Hz / hzPerBin;
+  const b2 = f2Hz / hzPerBin;
+  const sigma = 3.5;
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const lin =
+      1.0 * Math.exp(-((i - b1) ** 2) / (2 * sigma ** 2)) +
+      0.8 * Math.exp(-((i - b2) ** 2) / (2 * sigma ** 2)) +
+      1e-5;
+    a[i] = 20 * Math.log10(lin);
+  }
+  return a;
 }
 
 /**

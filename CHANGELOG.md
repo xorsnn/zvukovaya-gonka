@@ -4,6 +4,46 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.4.0] - 2026-06-30
+
+Rung 2 of the phonetic ladder — coarse vowel identity (issue #5). The cat can
+now tell *which* vowel is being held (а / о / у / и) and grade its speed toward
+the scene's target nucleus («кот» → «о»), instead of treating every sustained
+vowel alike (Rung 1). It is **graded, never gated**: a "wrong" or uncertain
+vowel still drives the cat clearly and still catches — it just runs a little
+slower than the right one. Ships behind `config.rung2`, **off by default** until
+tuned on the real mic; with it off, behavior is byte-identical to Rung 1.
+
+### Added
+- `src/audio/PhoneticFeatures.ts` — `estimateFormants(mag, sampleRate)`: a
+  robust coarse F1/F2 estimate by spectral-envelope peak-picking (silence →
+  0/0). `vowelMatch(formants, target, baseline)`: a gentle 0..1 closeness to the
+  target vowel, scored in the **child's own formant space** (the canonical vowel
+  map is anchored to her calibration vowel and used by ratio, so a 3-yr-old's
+  high/variable formants and even a "wrong" calibration vowel still preserve the
+  а-vs-о ordering). Plus a `Vowel` type and the `VOWEL_FORMANTS` reference map.
+- `AcousticPattern.vowel` — an optional target nucleus per scene (кот → «о»,
+  кит → «и», дом → «о»).
+- A bounded, assist-scaled **vowel-match factor** folded into `PatternMatcher`'s
+  `driveQuality` (`VOWEL_MATCH_FLOOR` keeps the worst case well above the
+  GameView `MIN_FLOOR`); `MatchState.vowelMatch` for the overlay + tests.
+- F1/F2 on `AudioFrame`, computed only when rung2 is enabled and reusing a
+  shared envelope buffer, so the default config (rung2 off) and the per-frame
+  audio loop allocate nothing for a disabled feature; per-child F1/F2 captured
+  during the mic-check and shown live in the `?debug` overlay (target + match bar).
+- Robustness: `vowelMatch` treats a NaN/zero formant or a half-baseline as "no
+  opinion" (neutral 1), so a degenerate estimate can never poison `driveQuality`.
+- Tests: `estimateFormants` / `vowelMatch` on synthetic vowel spectra (а/о/и
+  separable, speaker-relative), the four Rung-2 leniency invariants in
+  `PatternMatcher` (off → parity, never-gates, graded floor, assist→irrelevant),
+  and a real-engine `«о»` vs `«а»` integration drive. Suite grows 42 → 59.
+
+### Changed
+- `AudioEngine` exposes `getVowelBaseline()` and a `VowelBaseline` extended with
+  optional `f1`/`f2`; `main.ts` samples her formants on the mic-check and passes
+  `rung2` + the baseline into each round's matcher (live on a settings toggle).
+- README core-rule + ladder sections: Rung 2 is built (still no decode/gate).
+
 ## [0.3.0] - 2026-06-30
 
 Phonetic feature config — the foundation for Increment 2 (issue #4). The

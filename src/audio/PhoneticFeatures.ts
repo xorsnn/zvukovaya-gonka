@@ -80,7 +80,16 @@ export interface SpectralFeatures {
 export interface VowelBaseline {
   /** Mean spectral centroid (Hz) measured while she held a steady vowel. */
   centroid: number;
+  /** Mean first formant (Hz) of her calibration vowel — Rung 2 (#5). Optional:
+   * absent when the mic-check produced too little voiced audio to estimate. */
+  f1?: number;
+  /** Mean second formant (Hz) of her calibration vowel — Rung 2 (#5). */
+  f2?: number;
 }
+
+/** The four nucleus vowels a scene can ask for (Rung 2, #5). NOT a phoneme
+ * decode — only a coarse formant-region label the drive grades *toward*. */
+export type Vowel = "а" | "о" | "у" | "и";
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
@@ -202,4 +211,169 @@ export function vowelLikeness(
     VOWEL_WEIGHTS.centroid * centroidScore +
     VOWEL_WEIGHTS.lowBand * clamp01(low);
   return clamp01(score);
+}
+
+// ===========================================================================
+// Rung 2 (#5) — coarse vowel identity (which vowel: а / о / у / и).
+//
+// STILL NOT speech recognition: we estimate two formant *regions* (F1/F2) and
+// score how close the held sound sits to the scene's target vowel — relative to
+// the child's OWN calibrated vowel space, never absolute Hz. The result is a
+// soft 0..1 *match*, folded into chase speed as a gentle, bounded factor by the
+// matcher. A "wrong" vowel is never gated out; it just chases a little slower.
+// ===========================================================================
+
+/**
+ * Canonical formant centres (Hz) for the four nucleus vowels, an adult-ish
+ * reference. We never use these as absolute thresholds: {@link vowelMatch}
+ * anchors them to the child's own calibration vowel (treated as «а») and uses
+ * only the *ratios* between vowels, which are far more speaker-invariant than
+ * the absolute frequencies. So a 3-yr-old's high, variable formants are handled
+ * by scaling the whole map to her voice — see the age note in issue #1.
+ *
+ *   а — open, central:    high F1, mid  F2
+ *   о — back, rounded:    mid  F1, low  F2
+ *   у — close, back:      low  F1, low  F2
+ *   и — close, front:     low  F1, high F2
+ */
+export const VOWEL_FORMANTS: Record<Vowel, { f1: number; f2: number }> = {
+  а: { f1: 700, f2: 1300 },
+  о: { f1: 500, f2: 900 },
+  у: { f1: 320, f2: 700 },
+  и: { f1: 300, f2: 2200 },
+};
+
+/** Search band for F1 (Hz). Wide on the high side so a child's open «а» (F1 up
+ * to ~1 kHz) is not clipped. */
+export const F1_BAND = { min: 200, max: 1300 } as const;
+/** Search band for F2 (Hz). Wide on the high side for a child's front «и». */
+export const F2_BAND = { min: 700, max: 3600 } as const;
+/** F2 must sit at least this far above the chosen F1, so a single strong low
+ * lobe can't be picked as both formants. */
+export const F2_MIN_GAP = 250; // Hz
+/** Spectral-envelope smoothing width (Hz): wide enough to blur individual
+ * harmonics of a toddler's f0 (~250–400 Hz) so the peaks we pick are formant
+ * resonances, not pitch harmonics. */
+export const FORMANT_ENVELOPE_HZ = 260;
+/** Below this total linear-magnitude energy the spectrum is treated as silent
+ * and no formant is reported (returns 0/0 → {@link vowelMatch} stays neutral). */
+export const FORMANT_SILENCE_ENERGY = 1e-4;
+/** Log-frequency spread (in nats) of the vowel-match Gaussian. ~0.4 means a
+ * formant off by a factor of e^0.4 ≈ 1.5× scores ~0.6 — deliberately gentle. */
+export const VOWEL_MATCH_SIGMA = 0.42;
+
+/**
+ * estimateFormants — a coarse, robust F1/F2 estimate by spectral-envelope
+ * peak-picking. Pure: takes a LINEAR-magnitude spectrum (same convention as the
+ * other spectral functions) and returns the two dominant low/mid resonances.
+ *
+ * Method (kept deliberately simple — validate on the `?debug` overlay before
+ * reaching for LPC, per issue #5):
+ *   1. Smooth the magnitude spectrum with a moving average ~{@link
+ *      FORMANT_ENVELOPE_HZ} wide, so individual pitch harmonics blur into the
+ *      vocal-tract envelope and the peaks we find are formants, not harmonics.
+ *   2. F1 = frequency of the envelope's strongest bin within {@link F1_BAND}.
+ *   3. F2 = strongest bin within {@link F2_BAND} *and* at least
+ *      {@link F2_MIN_GAP} above F1, so the two never collapse onto one lobe.
+ *
+ * Returns `{ f1: 0, f2: 0 }` for an effectively-silent spectrum so callers can
+ * treat 0 as "no estimate" (neutral) rather than a real low formant.
+ *
+ * `scratch` (optional) is a caller-owned envelope buffer of length ≥ `mag.length`.
+ * Pass one to avoid a per-frame heap allocation on the audio hot path (the engine
+ * reuses a single buffer, like its other spectral scratch arrays); omit it and a
+ * fresh array is allocated, which keeps the pure-function tests allocation-free.
+ */
+export function estimateFormants(
+  mag: Float32Array,
+  sampleRate: number,
+  scratch?: Float32Array,
+): { f1: number; f2: number } {
+  const n = mag.length;
+  if (n <= 1) return { f1: 0, f2: 0 };
+  const hzPerBin = sampleRate / 2 / n;
+
+  // Bail on silence before doing any work (and so silence reports no formant).
+  let energy = 0;
+  for (let i = 1; i < n; i++) energy += mag[i];
+  if (energy < FORMANT_SILENCE_ENERGY) return { f1: 0, f2: 0 };
+
+  // 1) moving-average envelope (half-window in bins). Reuse the caller's buffer
+  // when it's big enough; the loop overwrites env[0..n-1] in full, so stale tail
+  // bytes from a larger buffer are never read.
+  const half = Math.max(1, Math.round(FORMANT_ENVELOPE_HZ / hzPerBin / 2));
+  const env = scratch && scratch.length >= n ? scratch : new Float32Array(n);
+  let acc = 0;
+  // running sum over [i-half, i+half]; seed with bins [0, half].
+  for (let i = 0; i <= Math.min(n - 1, half); i++) acc += mag[i];
+  for (let i = 0; i < n; i++) {
+    const enter = i + half;
+    const leave = i - half - 1;
+    if (i > 0) {
+      if (enter < n) acc += mag[enter];
+      if (leave >= 0) acc -= mag[leave];
+    }
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(n - 1, i + half);
+    env[i] = acc / (hi - lo + 1);
+  }
+
+  // Strongest envelope bin whose frequency lies in [loHz, hiHz].
+  const peakIn = (loHz: number, hiHz: number): { bin: number; hz: number } => {
+    const loBin = Math.max(1, Math.ceil(loHz / hzPerBin));
+    const hiBin = Math.min(n - 1, Math.floor(hiHz / hzPerBin));
+    let bestBin = -1;
+    let best = -Infinity;
+    for (let i = loBin; i <= hiBin; i++) {
+      if (env[i] > best) {
+        best = env[i];
+        bestBin = i;
+      }
+    }
+    return { bin: bestBin, hz: bestBin < 0 ? 0 : bestBin * hzPerBin };
+  };
+
+  const f1 = peakIn(F1_BAND.min, F1_BAND.max);
+  const f2 = peakIn(Math.max(F2_BAND.min, f1.hz + F2_MIN_GAP), F2_BAND.max);
+  return { f1: f1.hz, f2: f2.hz };
+}
+
+/**
+ * vowelMatch — 0..1 closeness of an observed (F1, F2) to the scene's target
+ * vowel, scored in the CHILD'S calibrated formant space, not absolute Hz.
+ *
+ * The baseline carries her calibration vowel's F1/F2 (treated as «а»). We place
+ * the target where it should sit *for her* by scaling the canonical map
+ * ({@link VOWEL_FORMANTS}) by her-«а» ÷ reference-«а», then score log-frequency
+ * distance with a gentle Gaussian ({@link VOWEL_MATCH_SIGMA}).
+ *
+ * Why anchor at «а» and use ratios: a consistent linear scale preserves the
+ * *relative ordering* of her vowels (her «о» stays below her «а») no matter
+ * which vowel she actually calibrated on — only the absolute centre drifts, and
+ * the drive only needs the ordering. Combined with the matcher's bounded factor
+ * and `assist`, a mis-anchored baseline can never punish a real attempt.
+ *
+ * Returns 1 (neutral — "no opinion") when there is no usable estimate or no
+ * calibrated formant baseline, so Rung 2 silently degrades to the Rung-1 feel.
+ */
+export function vowelMatch(
+  formants: { f1: number; f2: number },
+  target: Vowel,
+  baseline?: VowelBaseline | null,
+): number {
+  const { f1, f2 } = formants;
+  // `!(f > 0)` (not `f <= 0`) so a NaN formant also degrades to neutral — NaN
+  // would otherwise slip the guard (`NaN <= 0` is false) and poison driveQuality.
+  if (!baseline || !baseline.f1 || !baseline.f2 || !(f1 > 0) || !(f2 > 0)) {
+    return 1;
+  }
+  const refA = VOWEL_FORMANTS["а"];
+  const refT = VOWEL_FORMANTS[target];
+  const expF1 = baseline.f1 * (refT.f1 / refA.f1);
+  const expF2 = baseline.f2 * (refT.f2 / refA.f2);
+  const d1 = Math.log(f1 / expF1);
+  const d2 = Math.log(f2 / expF2);
+  const dist2 = d1 * d1 + d2 * d2;
+  const s = 2 * VOWEL_MATCH_SIGMA * VOWEL_MATCH_SIGMA;
+  return clamp01(Math.exp(-dist2 / s));
 }

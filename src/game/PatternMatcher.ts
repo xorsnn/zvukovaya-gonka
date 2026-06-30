@@ -26,6 +26,7 @@
  */
 
 import type { AudioFrame } from "../audio/AudioEngine";
+import { vowelMatch, type VowelBaseline } from "../audio/PhoneticFeatures";
 import type { AcousticPattern } from "./types";
 
 /** A flicker shorter than this does not reset an in-progress hold. */
@@ -33,6 +34,17 @@ export const DROPOUT_GRACE_MS = 150;
 
 /** Lower bound for the hold threshold even after baseline calibration. */
 export const MIN_HOLD_THRESHOLD = 0.4;
+
+/**
+ * Rung 2 (#5) leniency bound. A "wrong" vowel still keeps at least this fraction
+ * of the vowel-graded drive, so the cat always chases clearly above the
+ * GameView `MIN_FLOOR` — the worst case is "a bit slower", never "stalled". A
+ * perfect vowel keeps the full drive (factor 1). This is what makes Rung 2
+ * *graded, never gated*: identifying the vowel can only ADD speed for a match,
+ * it can never punish a real attempt down to nothing. See issue #5's leniency
+ * invariants.
+ */
+export const VOWEL_MATCH_FLOOR = 0.55;
 
 export interface MatchState {
   /** 0..1 chase-speed factor for this frame (graded by vowel-likeness × level). */
@@ -43,6 +55,9 @@ export interface MatchState {
   caught: boolean;
   /** Continuous vowel-like hold accumulated so far, ms (for UI/debug). */
   sustainHeldMs: number;
+  /** Rung 2 (#5): raw 0..1 closeness to the scene's target vowel (1 = no opinion,
+   * i.e. rung2 off / no target / no baseline). For the debug overlay + tests. */
+  vowelMatch: number;
 }
 
 function clamp01(x: number): number {
@@ -71,6 +86,20 @@ export class PatternMatcher {
    */
   private rung1: boolean;
 
+  /**
+   * Whether Rung 2 (vowel identity, #5) grades this round. Default OFF, so a
+   * matcher built without it behaves exactly as the shipped Rung-1 matcher
+   * (snapshot/feature parity, leniency invariant #1). When on AND the scene has
+   * a target `vowel` AND a calibrated formant baseline exists, a gentle,
+   * bounded vowel-match factor folds into `driveQuality` — never into the hold
+   * or the catch.
+   */
+  private rung2: boolean;
+
+  /** Per-child formant baseline (her «а»), so vowel-match is scored in HER vowel
+   * space, not absolute Hz. Null → Rung 2 stays neutral (no penalty). */
+  private vowelBaseline: VowelBaseline | null;
+
   private sustainHeldMs = 0;
   private dropoutMs = 0;
   private holdSatisfied = false;
@@ -78,7 +107,13 @@ export class PatternMatcher {
 
   constructor(
     pattern: AcousticPattern,
-    opts?: { assist?: number; holdThreshold?: number; rung1?: boolean },
+    opts?: {
+      assist?: number;
+      holdThreshold?: number;
+      rung1?: boolean;
+      rung2?: boolean;
+      vowelBaseline?: VowelBaseline | null;
+    },
   ) {
     this.pattern = pattern;
     this.assist = clamp01(opts?.assist ?? 0.5);
@@ -87,6 +122,8 @@ export class PatternMatcher {
       opts?.holdThreshold ?? MIN_HOLD_THRESHOLD,
     );
     this.rung1 = opts?.rung1 ?? true;
+    this.rung2 = opts?.rung2 ?? false;
+    this.vowelBaseline = opts?.vowelBaseline ?? null;
   }
 
   /** Start a fresh round. */
@@ -125,7 +162,27 @@ export class PatternMatcher {
     // assist lifts the effective vowel-likeness toward 1, easing the grading.
     const effVowel = lerp(frame.vowelLikeness, 1, this.assist * 0.5);
     const quality = wantVowel ? effVowel : 1; // Rung 0 grades on loudness only.
-    const driveQuality = clamp01(quality * frame.level);
+
+    // --- Rung 2 (#5): vowel-identity speed factor (graded, NEVER a gate) ---
+    // A raw 0..1 closeness to the scene's target vowel, scored in HER formant
+    // space. We only ADD speed for a match: the factor is bounded to
+    // [VOWEL_MATCH_FLOOR, 1], and `assist` lifts the match toward 1 so a high
+    // assist makes vowel identity barely matter (back to the Rung-1 feel). With
+    // rung2 off / no target / no baseline this is exactly 1 → byte-identical
+    // Rung-1 drive (parity, leniency invariant #1). It touches ONLY driveQuality;
+    // the hold and the catch below stay pure Rung-1.
+    const vmatch =
+      this.rung2 && this.pattern.vowel
+        ? vowelMatch(
+            { f1: frame.f1, f2: frame.f2 },
+            this.pattern.vowel,
+            this.vowelBaseline,
+          )
+        : 1;
+    const effMatch = lerp(vmatch, 1, this.assist);
+    const vowelFactor = VOWEL_MATCH_FLOOR + (1 - VOWEL_MATCH_FLOOR) * effMatch;
+
+    const driveQuality = clamp01(quality * frame.level * vowelFactor);
 
     // --- hold accumulation with dropout grace ---
     const holdOk =
@@ -164,6 +221,7 @@ export class PatternMatcher {
       holdSatisfied: this.holdSatisfied,
       caught,
       sustainHeldMs: this.sustainHeldMs,
+      vowelMatch: vmatch,
     };
   }
 }

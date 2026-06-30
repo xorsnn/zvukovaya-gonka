@@ -115,8 +115,10 @@ hintEl.textContent = game.getScene().hint;
 // settings survive a reload. With no rung enabled the game runs exactly as the
 // shipped loudness-only build (the generalization of the old USE_PHONETIC).
 const config = loadConfig();
-// Tell the engine whether to run the spectral layer at all.
+// Tell the engine whether to run the spectral layer at all, and whether to spend
+// the extra per-frame formant pass (only when Rung 2 actually grades a scene).
 audio.setPhoneticEnabled(anyRungOn(config));
+audio.setRung2Enabled(config.rung2);
 
 /** Hold threshold for vowel-likeness; tightened/relaxed by mic-check calibration. */
 let calibHoldThreshold = MIN_HOLD_THRESHOLD;
@@ -128,10 +130,15 @@ let matcher: PatternMatcher | null = null;
 // relative to her own voice (see the age note in #1) instead of an adult number.
 let calibVowel: number[] = [];
 let calibCentroid: number[] = [];
+// Her formants too (Rung 2, #5), so vowel-match is scored in HER vowel space.
+let calibF1: number[] = [];
+let calibF2: number[] = [];
 
 function resetCalibrationSamples(): void {
   calibVowel = [];
   calibCentroid = [];
+  calibF1 = [];
+  calibF2 = [];
 }
 
 function mean(xs: number[]): number {
@@ -146,7 +153,14 @@ function mean(xs: number[]): number {
 function finalizeCalibration(): void {
   if (!anyRungOn(config)) return;
   if (calibVowel.length >= 12) {
-    audio.setVowelBaseline({ centroid: mean(calibCentroid) });
+    // Carry her F1/F2 only if we gathered enough non-zero estimates; the
+    // matcher treats a missing pair as "no opinion" (graded, never gated, #5).
+    const f1 = mean(calibF1.filter((v) => v > 0));
+    const f2 = mean(calibF2.filter((v) => v > 0));
+    audio.setVowelBaseline({
+      centroid: mean(calibCentroid),
+      ...(f1 > 0 && f2 > 0 ? { f1, f2 } : {}),
+    });
     calibHoldThreshold = Math.max(MIN_HOLD_THRESHOLD, mean(calibVowel) * 0.6);
   } else {
     audio.setVowelBaseline(null);
@@ -157,7 +171,8 @@ function finalizeCalibration(): void {
 /**
  * (Re)build the matcher for the current scene; null when no rung is enabled (the
  * loudness-only path). `rung1` gates the vowel grading inside the matcher;
- * rungs 2/3 are no-ops until #5/#6 layer their detectors on top.
+ * `rung2` adds the vowel-identity speed factor (#5), scored against her
+ * calibrated formant baseline; rung 3 is a no-op until #6 layers on top.
  */
 function buildMatcher(): void {
   if (!anyRungOn(config)) {
@@ -169,6 +184,8 @@ function buildMatcher(): void {
     assist: config.assist,
     holdThreshold: calibHoldThreshold,
     rung1: config.rung1,
+    rung2: config.rung2,
+    vowelBaseline: audio.getVowelBaseline(),
   });
   game.setMatcher(matcher);
 }
@@ -196,6 +213,7 @@ function onRungChange(): void {
   config.rung2 = rung2Toggle.checked;
   config.rung3 = rung3Toggle.checked;
   audio.setPhoneticEnabled(anyRungOn(config));
+  audio.setRung2Enabled(config.rung2);
   buildMatcher();
   saveConfig(config);
 }
@@ -336,12 +354,16 @@ function renderDebug(frame: AudioFrame): void {
   const effHold = calibHoldThreshold * (1 - config.assist * 0.7);
   const effMin = game.getScene().pattern.sustain.minMs * (1 - config.assist * 0.6);
   const f = (x: number, d = 2) => x.toFixed(d);
+  const target = game.getScene().pattern.vowel;
+  const vm = m?.vowelMatch ?? 1;
   dbgEl.textContent =
     `vowelLike ${f(frame.vowelLikeness)} ${dbgBar(frame.vowelLikeness)}\n` +
     ` flatness ${f(frame.flatness)} ${dbgBar(frame.flatness)}\n` +
     `      zcr ${f(frame.zcr)} ${dbgBar(frame.zcr)}\n` +
     `  lowBand ${f(frame.lowBandRatio)} ${dbgBar(frame.lowBandRatio)}\n` +
     ` centroid ${Math.round(frame.centroid)} Hz\n` +
+    `   F1/F2 ${Math.round(frame.f1)}/${Math.round(frame.f2)} Hz` +
+    `${config.rung2 && target ? `  →«${target}» ${f(vm)} ${dbgBar(vm)}` : ""}\n` +
     `    level ${f(frame.level)}  ${frame.voiced ? "●voiced" : "·quiet"}\n` +
     `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
     `  thr ${f(effHold)}  assist ${f(config.assist, 1)}\n` +
@@ -362,14 +384,19 @@ function loop(now: number): void {
     } else if (!audio.isRunning) {
       checkHint.textContent = "Жду звук…";
     }
-    // Sample her sustained-vowel baseline while she makes sound (issue #1).
+    // Sample her sustained-vowel baseline while she makes sound (issue #1) —
+    // including F1/F2 for the Rung-2 vowel-match space (#5).
     if (anyRungOn(config) && frame.voiced && frame.level > 0.2) {
       calibVowel.push(frame.vowelLikeness);
       calibCentroid.push(frame.centroid);
+      calibF1.push(frame.f1);
+      calibF2.push(frame.f2);
       // Cap so a long mic-check can't grow these unbounded.
       if (calibVowel.length > 240) {
         calibVowel.shift();
         calibCentroid.shift();
+        calibF1.shift();
+        calibF2.shift();
       }
     }
   } else if (current === "game") {
