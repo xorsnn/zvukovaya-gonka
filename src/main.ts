@@ -1,10 +1,11 @@
 import "./style.css";
-import { AudioEngine, USE_PHONETIC, type AudioFrame } from "./audio/AudioEngine";
+import { AudioEngine, type AudioFrame } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
 import { GameView } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { DEFAULT_WORD } from "./game/words";
 import { speakWord } from "./game/sfx";
+import { loadConfig, saveConfig, anyRungOn } from "./game/config";
 
 type Screen = "start" | "check" | "denied" | "game";
 
@@ -53,12 +54,24 @@ app.innerHTML = `
       <button class="btn btn-go" id="againBtn">Ещё раз 🔁</button>
     </div>
     <div class="parent-controls">
-      <label class="assist-control" id="assistControl">
-        <span class="assist-cap">строго</span>
-        <input type="range" id="assistSlider" min="0" max="1" step="0.1" value="0.5" aria-label="Строгость распознавания" />
-        <span class="assist-cap">легче</span>
-      </label>
-      <button class="parent-link" id="recalBtn">⚙ микрофон</button>
+      <button class="parent-link gear-btn" id="gearBtn" aria-expanded="false" aria-controls="settingsPanel" aria-label="Настройки для взрослого">⚙</button>
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <p class="settings-title">Для взрослого</p>
+        <div class="settings-rungs">
+          <label><input type="checkbox" id="rung1Toggle" /> <span>гласные / шум</span></label>
+          <label><input type="checkbox" id="rung2Toggle" /> <span>какая гласная</span></label>
+          <label><input type="checkbox" id="rung3Toggle" /> <span>согласные / Т</span></label>
+        </div>
+        <label class="assist-control" id="assistControl">
+          <span class="assist-cap">строго</span>
+          <input type="range" id="assistSlider" min="0" max="1" step="0.1" value="0.5" aria-label="Строгость распознавания" />
+          <span class="assist-cap">легче</span>
+        </label>
+        <div class="settings-row">
+          <label><input type="checkbox" id="debugToggle" /> <span>отладка</span></label>
+          <button class="parent-link" id="recalBtn">🎤 микрофон</button>
+        </div>
+      </div>
     </div>
   </section>
 `;
@@ -75,8 +88,13 @@ const retryBtn = el<HTMLButtonElement>("#retryBtn");
 const listenBtn = el<HTMLButtonElement>("#listenBtn");
 const againBtn = el<HTMLButtonElement>("#againBtn");
 const recalBtn = el<HTMLButtonElement>("#recalBtn");
-const assistControl = el<HTMLElement>("#assistControl");
+const gearBtn = el<HTMLButtonElement>("#gearBtn");
+const settingsPanel = el<HTMLElement>("#settingsPanel");
 const assistSlider = el<HTMLInputElement>("#assistSlider");
+const rung1Toggle = el<HTMLInputElement>("#rung1Toggle");
+const rung2Toggle = el<HTMLInputElement>("#rung2Toggle");
+const rung3Toggle = el<HTMLInputElement>("#rung3Toggle");
+const debugToggle = el<HTMLInputElement>("#debugToggle");
 const checkHint = el<HTMLElement>("#checkHint");
 const celebrate = el<HTMLElement>("#celebrate");
 const sustainEl = el<HTMLElement>("#sustainEl");
@@ -90,12 +108,16 @@ sustainEl.textContent = game.getScene().sustainPart;
 burstEl.textContent = game.getScene().burstPart;
 hintEl.textContent = game.getScene().hint;
 
-// ---------- phonetic ladder (issue #1) ----------
-// The whole layer hides behind USE_PHONETIC: off → no matcher, no slider, and
-// the game runs exactly as the shipped loudness-only build.
+// ---------- phonetic ladder config (issues #1, #4) ----------
+// `config` is the single source of truth for the whole phonetic layer: the
+// per-rung toggles, the assist continuum, and the debug overlay. It is loaded
+// from localStorage at startup and re-saved on every caregiver change, so the
+// settings survive a reload. With no rung enabled the game runs exactly as the
+// shipped loudness-only build (the generalization of the old USE_PHONETIC).
+const config = loadConfig();
+// Tell the engine whether to run the spectral layer at all.
+audio.setPhoneticEnabled(anyRungOn(config));
 
-/** 0 = strict grading, 1 = easy (close to today's loudness-only feel). */
-let assist = 0.5;
 /** Hold threshold for vowel-likeness; tightened/relaxed by mic-check calibration. */
 let calibHoldThreshold = MIN_HOLD_THRESHOLD;
 /** The matcher for the active round (rebuilt each round from the latest config). */
@@ -122,7 +144,7 @@ function mean(xs: number[]): number {
  * generous adult defaults rather than guessing.
  */
 function finalizeCalibration(): void {
-  if (!USE_PHONETIC) return;
+  if (!anyRungOn(config)) return;
   if (calibVowel.length >= 12) {
     audio.setVowelBaseline({ centroid: mean(calibCentroid) });
     calibHoldThreshold = Math.max(MIN_HOLD_THRESHOLD, mean(calibVowel) * 0.6);
@@ -132,25 +154,65 @@ function finalizeCalibration(): void {
   }
 }
 
-/** (Re)build the matcher for the current scene; null when phonetics are off. */
+/**
+ * (Re)build the matcher for the current scene; null when no rung is enabled (the
+ * loudness-only path). `rung1` gates the vowel grading inside the matcher;
+ * rungs 2/3 are no-ops until #5/#6 layer their detectors on top.
+ */
 function buildMatcher(): void {
-  if (!USE_PHONETIC) {
+  if (!anyRungOn(config)) {
     matcher = null;
     game.setMatcher(null);
     return;
   }
   matcher = new PatternMatcher(game.getScene().pattern, {
-    assist,
+    assist: config.assist,
     holdThreshold: calibHoldThreshold,
+    rung1: config.rung1,
   });
   game.setMatcher(matcher);
 }
 
-// The assist slider is meaningless without the phonetic layer — hide it then.
-if (!USE_PHONETIC) assistControl.style.display = "none";
+// ---------- caregiver settings panel (issue #4) ----------
+// Reflect the loaded config into the controls, then write every change straight
+// back to localStorage and apply it live (no reload). The panel hides behind the
+// gear so a child can't trip the switches.
+rung1Toggle.checked = config.rung1;
+rung2Toggle.checked = config.rung2;
+rung3Toggle.checked = config.rung3;
+assistSlider.value = String(config.assist);
+debugToggle.checked = config.debug;
+
+gearBtn.addEventListener("click", () => {
+  const willOpen = settingsPanel.hasAttribute("hidden");
+  settingsPanel.toggleAttribute("hidden", !willOpen);
+  gearBtn.setAttribute("aria-expanded", String(willOpen));
+});
+
+// A rung toggle flips the spectral layer on/off and rebuilds the matcher so the
+// change takes effect instantly, mid-session — the config's rollback path.
+function onRungChange(): void {
+  config.rung1 = rung1Toggle.checked;
+  config.rung2 = rung2Toggle.checked;
+  config.rung3 = rung3Toggle.checked;
+  audio.setPhoneticEnabled(anyRungOn(config));
+  buildMatcher();
+  saveConfig(config);
+}
+rung1Toggle.addEventListener("change", onRungChange);
+rung2Toggle.addEventListener("change", onRungChange);
+rung3Toggle.addEventListener("change", onRungChange);
+
 assistSlider.addEventListener("input", () => {
-  assist = parseFloat(assistSlider.value);
-  matcher?.setAssist(assist);
+  config.assist = parseFloat(assistSlider.value);
+  matcher?.setAssist(config.assist);
+  saveConfig(config);
+});
+
+debugToggle.addEventListener("change", () => {
+  config.debug = debugToggle.checked;
+  setDebugVisible(urlDebug || config.debug);
+  saveConfig(config);
 });
 
 // ---------- screen management ----------
@@ -238,21 +300,30 @@ recalBtn.addEventListener("click", () => {
   showScreen("check");
 });
 
-// ---------- debug overlay (add ?debug=1 to the URL) ----------
+// ---------- debug overlay (?debug=1 in the URL OR the «отладка» toggle) ----------
 // A hidden tuning aid: shows the live phonetic features + matcher state so we can
-// see WHY a sound does or doesn't count as a vowel. Off entirely unless the URL
-// carries ?debug, so it never touches normal play. Works on the mic-check screen
-// (read the features for «ооо» vs «шшш») and during the game.
-const DEBUG = new URLSearchParams(location.search).has("debug");
-const dbgEl = DEBUG ? document.createElement("pre") : null;
-if (dbgEl) {
-  dbgEl.style.cssText =
-    "position:fixed;top:6px;left:6px;z-index:9;margin:0;padding:8px 10px;" +
-    "font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;" +
-    "color:#27e07a;background:rgba(0,0,0,0.72);border-radius:8px;" +
-    "pointer-events:none;letter-spacing:0.3px;";
-  document.body.appendChild(dbgEl);
+// see WHY a sound does or doesn't count as a vowel. Created lazily and shown only
+// when the URL carries ?debug or the caregiver flips the toggle, so it never
+// touches normal play. Works on the mic-check screen (read the features for «ооо»
+// vs «шшш») and during the game.
+const urlDebug = new URLSearchParams(location.search).has("debug");
+let dbgEl: HTMLPreElement | null = null;
+let dbgVisible = false;
+
+function setDebugVisible(on: boolean): void {
+  dbgVisible = on;
+  if (on && !dbgEl) {
+    dbgEl = document.createElement("pre");
+    dbgEl.style.cssText =
+      "position:fixed;top:6px;left:6px;z-index:9;margin:0;padding:8px 10px;" +
+      "font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;" +
+      "color:#27e07a;background:rgba(0,0,0,0.72);border-radius:8px;" +
+      "pointer-events:none;letter-spacing:0.3px;";
+    document.body.appendChild(dbgEl);
+  }
+  if (dbgEl) dbgEl.style.display = on ? "block" : "none";
 }
+setDebugVisible(urlDebug || config.debug);
 
 function dbgBar(x: number, n = 10): string {
   const k = Math.max(0, Math.min(n, Math.round(x * n)));
@@ -262,8 +333,8 @@ function dbgBar(x: number, n = 10): string {
 function renderDebug(frame: AudioFrame): void {
   if (!dbgEl) return;
   const m = game.debugMatch;
-  const effHold = calibHoldThreshold * (1 - assist * 0.7);
-  const effMin = game.getScene().pattern.sustain.minMs * (1 - assist * 0.6);
+  const effHold = calibHoldThreshold * (1 - config.assist * 0.7);
+  const effMin = game.getScene().pattern.sustain.minMs * (1 - config.assist * 0.6);
   const f = (x: number, d = 2) => x.toFixed(d);
   dbgEl.textContent =
     `vowelLike ${f(frame.vowelLikeness)} ${dbgBar(frame.vowelLikeness)}\n` +
@@ -273,7 +344,7 @@ function renderDebug(frame: AudioFrame): void {
     ` centroid ${Math.round(frame.centroid)} Hz\n` +
     `    level ${f(frame.level)}  ${frame.voiced ? "●voiced" : "·quiet"}\n` +
     `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
-    `  thr ${f(effHold)}  assist ${f(assist, 1)}\n` +
+    `  thr ${f(effHold)}  assist ${f(config.assist, 1)}\n` +
     `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;
 }
 
@@ -292,7 +363,7 @@ function loop(now: number): void {
       checkHint.textContent = "Жду звук…";
     }
     // Sample her sustained-vowel baseline while she makes sound (issue #1).
-    if (USE_PHONETIC && frame.voiced && frame.level > 0.2) {
+    if (anyRungOn(config) && frame.voiced && frame.level > 0.2) {
       calibVowel.push(frame.vowelLikeness);
       calibCentroid.push(frame.centroid);
       // Cap so a long mic-check can't grow these unbounded.
@@ -306,7 +377,7 @@ function loop(now: number): void {
     updateWordHighlight(frame);
   }
 
-  if (dbgEl && (current === "check" || current === "game")) renderDebug(frame);
+  if (dbgVisible && (current === "check" || current === "game")) renderDebug(frame);
 
   requestAnimationFrame(loop);
 }

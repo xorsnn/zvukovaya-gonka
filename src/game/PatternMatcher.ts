@@ -62,6 +62,15 @@ export class PatternMatcher {
   /** Base vowel-likeness needed to count as "holding"; from calibration. */
   private holdThreshold: number;
 
+  /**
+   * Whether Rung 1 (vowel-ish vs noise) grades this round (issue #4 config).
+   * When off, the hold gate is loudness-only — any voicing counts, regardless of
+   * the scene's `want: "vowel"` — so the matcher reduces to Rung 0. Rungs 2/3
+   * (vowel identity / consonant class, #5/#6) layer additively on top of this and
+   * default off, so with only rung1 on the behavior is exactly Increment-1.
+   */
+  private rung1: boolean;
+
   private sustainHeldMs = 0;
   private dropoutMs = 0;
   private holdSatisfied = false;
@@ -69,7 +78,7 @@ export class PatternMatcher {
 
   constructor(
     pattern: AcousticPattern,
-    opts?: { assist?: number; holdThreshold?: number },
+    opts?: { assist?: number; holdThreshold?: number; rung1?: boolean },
   ) {
     this.pattern = pattern;
     this.assist = clamp01(opts?.assist ?? 0.5);
@@ -77,6 +86,7 @@ export class PatternMatcher {
       MIN_HOLD_THRESHOLD,
       opts?.holdThreshold ?? MIN_HOLD_THRESHOLD,
     );
+    this.rung1 = opts?.rung1 ?? true;
   }
 
   /** Start a fresh round. */
@@ -108,7 +118,8 @@ export class PatternMatcher {
    * call (already clamped by the caller). Returns this frame's verdict.
    */
   update(frame: AudioFrame, dtMs: number): MatchState {
-    const wantVowel = this.pattern.sustain.want === "vowel";
+    // Rung 1 off → grade on loudness alone (Rung 0), even for a "vowel" scene.
+    const wantVowel = this.pattern.sustain.want === "vowel" && this.rung1;
 
     // --- speed grading (always non-zero on real voicing; floor is in GameView) ---
     // assist lifts the effective vowel-likeness toward 1, easing the grading.
