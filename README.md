@@ -41,7 +41,12 @@ window, and for a «т»-final scene the matcher *adds* an earlier burst-catch o
 the «т» release. It ships behind `config.rung3`, **off by default**; with it off
 behavior is exactly Rung 1/2, and even on, a real vowel hold + a stop always
 catches — running out of breath (no crisp burst) still wins, and a lone «т» or a
-continuous «р» hum is never enough on its own.
+continuous «р» hum is never enough on its own. **Caveat (pending real-mic
+tuning):** the burst-catch keys off the engine's smoothed `voiced` flag, which
+takes ~387 ms of silence to drop, so a natural «т» closure (50–150 ms) currently
+falls through to the plain final-silence gap (= Rung 1) rather than firing on the
+burst. Making the «т» release genuinely fire needs a faster closure detector and
+real-mic validation — see the note on `RUNG3_MIN_CLOSURE_MS` in `PatternMatcher.ts`.
 
 Everything is driven from the Web Audio API `AnalyserNode`
 (`getFloatTimeDomainData` → RMS + ZCR; `getFloatFrequencyData` → the spectral

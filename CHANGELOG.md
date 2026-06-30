@@ -4,6 +4,44 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.5.1] - 2026-07-01
+
+Post-merge review follow-up for Rung 3 (issue #6). No behavior change: the review
+confirmed leniency, parity, and round-isolation all hold, with no production
+bugs. This release closes the review's test gaps, removes dead code, and corrects
+the docs to be honest about a known limitation of the «т» burst-catch.
+
+### Fixed (tests & docs)
+- **Honest docs on the «т» burst-catch.** The burst path keys off the engine's
+  smoothed `voiced` flag, which takes ~387 ms of silence to drop (120 ms release
+  time-constant); a natural «т» closure is 50–150 ms, so it never arms and the
+  catch falls back to the final-silence gap (= Rung 1). The feature is therefore
+  inert on real speech today — a faster closure detector + real-mic validation is
+  deferred to the Rung-3 mic-tuning phase. README, CHANGELOG, and a
+  `RUNG3_MIN_CLOSURE_MS` code note now say so instead of overclaiming.
+- **Vacuous classifier test.** The "burst → reset → silence" test used a
+  first-closure length equal to `CONSONANT_GAP_FRAMES`, so it returned `"stop"`
+  before reaching the burst and never exercised the gap-reset branch it claimed
+  to cover. Shortened the first closure below the threshold so the reset path runs.
+- **New regression coverage:** rung3-on + non-stop scene adds no burst-catch (the
+  `want === "stop"` guard); the burst "no-fire" path (closure < `RUNG3_MIN_CLOSURE_MS`);
+  the `RUNG3_MIN_CLOSURE_MS` and fricative-`0.5` boundaries; the burst-catch is
+  edge-triggered exactly once; and `reset()` clears the Rung-3 window + arm state
+  between rounds (previously `reset()` had zero coverage).
+
+### Removed
+- The unused `opts` (`gapFrames`/`minVoicedFrames`) override on
+  `classifyConsonant` — dead API, no caller passed it. The classifier reads its
+  `CONSONANT_*` constants directly. Add it back with a test if a real need appears.
+
+### Changed (docs only)
+- Refreshed the stale `PatternMatcher` header JSDoc (the `caught` bullet now
+  notes the additive Rung-3 burst path; the class scope widened to Rungs 0–3),
+  reworded the classifier's "a majority" to "at least half" to match the `>= 0.5`
+  knee, and noted the `classifyConsonant` terminal-silence labelling limitation
+  (a held-then-released sonorant ends in silence and reads as "stop"; the label
+  is debug-only and gates nothing).
+
 ## [0.5.0] - 2026-06-30
 
 Rung 3 of the phonetic ladder — coarse consonant class & the real «т» stop

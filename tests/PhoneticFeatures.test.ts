@@ -283,13 +283,16 @@ describe("classifyConsonant (Rung 3, #6)", () => {
   });
 
   it("AC#1: a hold → closure → burst → silence is still a STOP (the «т» release)", () => {
-    // The re-onset burst resets the closure count, but the post-burst silence is
-    // itself a real gap, so the crisp «т» still reads as a stop.
+    // The first closure is DELIBERATELY shorter than CONSONANT_GAP_FRAMES (2 < 3)
+    // so it can't make a stop on its own; the burst then resets the closure count,
+    // and ONLY the longer post-burst silence reaches the threshold. This forces
+    // the `gap = 0` reset-on-burst branch to run (a 3-frame first closure would
+    // short-circuit to "stop" before the burst, leaving that branch untested).
     const frames = [
       ...run(12, true, VOWEL_ZCR), // «ооо» hold
-      ...run(3, false), // closure
-      ...run(1, true, HISS_ZCR), // «т» burst (a brief noisy transient)
-      ...run(8, false), // final silence
+      ...run(2, false), // brief closure (< CONSONANT_GAP_FRAMES)
+      ...run(1, true, HISS_ZCR), // «т» burst → resets the gap counter to 0
+      ...run(4, false), // post-burst silence (>= CONSONANT_GAP_FRAMES) → STOP
     ];
     expect(classifyConsonant(frames)).toBe("stop");
   });
@@ -306,6 +309,15 @@ describe("classifyConsonant (Rung 3, #6)", () => {
     expect(
       classifyConsonant([...run(12, true, HISS_ZCR), ...run(8, false)]),
     ).toBe("fricative");
+  });
+
+  it("the fricative knee is `>= 0.5`: exactly half hiss-voiced is a FRICATIVE, just under is not", () => {
+    // Guards the comparator at CONSONANT_FRICATIVE_FRAC: an off-by-one flip of
+    // `>=` to `>` would reclassify the exact-half case (a tie counts as fricative).
+    const half = [...run(6, true, HISS_ZCR), ...run(6, true, VOWEL_ZCR)]; // 6/12 = 0.5
+    expect(classifyConsonant(half)).toBe("fricative");
+    const under = [...run(5, true, HISS_ZCR), ...run(7, true, VOWEL_ZCR)]; // 5/12 < 0.5
+    expect(classifyConsonant(under)).toBe("sonorant"); // voiced throughout, no gap
   });
 
   it("the three classes are mutually separable on the same window length", () => {

@@ -428,8 +428,9 @@ export const CONSONANT_MIN_VOICED_FRAMES = 3;
  * a fricative hiss, or none. Pure: feed it a canned array in a test (AC#1).
  *
  * Decision order (coarsest, most distinctive first):
- *   1. fricative — a majority of the *voiced* frames are hiss-like (high ZCR).
- *      A «шшш» is voiced-above-floor throughout but never tonal.
+ *   1. fricative — at least half of the *voiced* frames are hiss-like (high ZCR),
+ *      i.e. the `>= CONSONANT_FRICATIVE_FRAC` (0.5) knee. A «шшш» is
+ *      voiced-above-floor throughout but never tonal.
  *   2. stop — a sustained voiced run is followed (anywhere after) by a real
  *      near-silence CLOSURE of ≥ {@link CONSONANT_GAP_FRAMES} non-voiced frames.
  *      Captures «vowel → closure → burst → silence» and plain «vowel → silence»
@@ -437,13 +438,18 @@ export const CONSONANT_MIN_VOICED_FRAMES = 3;
  *   3. sonorant — a sustained low-ZCR voiced run with NO closing gap. A held
  *      «р»/«м» hum reads vowel-like to Rung 1 but never finishes with a stop.
  *   4. none — too little (or too scattered) signal to say.
+ *
+ * CAVEAT (the stop/sonorant split is only meaningful WHILE the sound is live):
+ * because *every* completed word ends in trailing silence, a held-then-released
+ * sonorant («дом»'s «м» → silence) also satisfies the "stop" rule and is labelled
+ * "stop"; "sonorant" only shows mid-hum, before the word ends. Telling a terminal
+ * «м» from a terminal «т» needs the burst, which the real engine can't surface yet
+ * (see the burst-catch note in PatternMatcher). The label is consumed only by the
+ * `?debug` overlay today, so this is cosmetic — it gates nothing.
  */
-export function classifyConsonant(
-  frames: ReleaseFrame[],
-  opts?: { gapFrames?: number; minVoicedFrames?: number },
-): ConsonantClass {
-  const gapFrames = opts?.gapFrames ?? CONSONANT_GAP_FRAMES;
-  const minVoiced = opts?.minVoicedFrames ?? CONSONANT_MIN_VOICED_FRAMES;
+export function classifyConsonant(frames: ReleaseFrame[]): ConsonantClass {
+  const gapFrames = CONSONANT_GAP_FRAMES;
+  const minVoiced = CONSONANT_MIN_VOICED_FRAMES;
   const n = frames.length;
 
   // Texture: of all voiced frames, how many are hiss-like?
