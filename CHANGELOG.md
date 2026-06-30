@@ -4,6 +4,45 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.3.0] - 2026-06-30
+
+Phonetic feature config — the foundation for Increment 2 (issue #4). The
+scattered Increment-1 switches (the `USE_PHONETIC` kill-switch, the ad-hoc assist
+slider state) are unified into one persisted `PhoneticConfig`, and a caregiver
+settings panel drives it live. Higher rungs (#5/#6) now have an on/off switch to
+hang their behavior off; both default off until tuned. No behavior change with
+the default config — Rung 1 stays on and plays exactly as it shipped.
+
+### Added
+- `src/game/config.ts` — `PhoneticConfig` (per-rung `rung1`/`rung2`/`rung3`
+  flags, the `assist` continuum, a `debug` flag) as the single source of truth,
+  with `DEFAULT_CONFIG`, `anyRungOn()`, and a defensive `localStorage` store
+  (`loadConfig`/`saveConfig`). The store never throws: a missing key, corrupt or
+  partial JSON, an out-of-range value, private-mode, or a throwing/quota-full
+  storage all degrade to defaults.
+- A caregiver **settings panel** behind the ⚙ gear on the game screen: a toggle
+  per rung (**гласные/шум**, **какая гласная**, **согласные/Т**), the existing
+  **строго ↔ легче** slider, an **отладка** (debug overlay) toggle, and the mic
+  **🎤 микрофон** recalibration. Hidden by default so a child can't trip it;
+  every change persists and applies live, mid-session.
+- Tests: a `config` store suite (round-trip, corrupt/partial/clamped/null/
+  throwing storage, `anyRungOn` truth table), an all-rungs-off → loudness-only
+  trajectory identity (AC#2), and a `PatternMatcher` Rung-1-gating case (AC#3).
+  Suite grows from 27 to 42 tests.
+
+### Changed
+- `AudioEngine` — the `USE_PHONETIC` const is replaced by a config-driven
+  `setPhoneticEnabled(anyRungOn(config))`; `sample()` runs the spectral layer iff
+  any rung is enabled. Defaults on, so a directly-constructed engine is unchanged.
+- `PatternMatcher` — takes an optional `rung1` flag (default on). With Rung 1 off
+  the hold gate is loudness-only (Rung 0); rungs 2/3 layer additively on top.
+- `main.ts` reads the config at startup and the engine, matcher, debug overlay,
+  and calibration all consult it; the debug overlay is now toggleable live
+  (`?debug` **or** the panel toggle) instead of URL-only.
+
+### Removed
+- The exported `USE_PHONETIC` constant (generalized to "is any rung on?").
+
 ## [0.2.0] - 2026-06-29
 
 Phonetic discrimination ladder — Increment 1 (issue #1). The cat now grades how

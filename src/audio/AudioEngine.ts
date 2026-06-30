@@ -10,8 +10,9 @@
  * vowel it was. Any voiced sound is still rewarded; a clearer vowel is rewarded
  * *more* (graded, never punished — see {@link PatternMatcher}).
  *
- * The whole spectral layer is additive and sits behind {@link USE_PHONETIC}.
- * Flip that off and `sample()` returns exactly the pre-#1 loudness-only frame.
+ * The whole spectral layer is additive and sits behind a config-driven flag
+ * (see {@link AudioEngine.setPhoneticEnabled}, fed from `PhoneticConfig`). With
+ * no rung enabled `sample()` returns exactly the pre-#1 loudness-only frame.
  *
  * What we expose every frame (see {@link AudioFrame}):
  *   - level:   self-scaling 0..1 loudness for meters & chase speed. Auto-adapts
@@ -34,15 +35,6 @@ import {
   vowelLikeness,
   type VowelBaseline,
 } from "./PhoneticFeatures";
-
-/**
- * Master kill-switch for the phonetic layer (issue #1 rollback plan). When
- * `false`, `sample()` skips all spectral work and every phonetic field on the
- * frame is 0, so the game falls back to the shipped loudness-only behavior.
- * Typed `boolean` (not the literal `true`) so toggling it never produces
- * "unreachable code" noise.
- */
-export const USE_PHONETIC: boolean = true;
 
 /**
  * The slice of `AnalyserNode` the engine actually uses. Declaring it as an
@@ -75,7 +67,7 @@ export interface AudioFrame {
   /** Milliseconds of silence since voicing stopped (0 while voiced). */
   silenceMs: number;
 
-  // ---- phonetic layer (issue #1); all 0 when USE_PHONETIC is false ----
+  // ---- phonetic layer (issue #1); all 0 when the phonetic layer is off ----
   /** Spectral flatness 0..1: ~0 tonal/vowel, ~1 noisy/shriek. */
   flatness: number;
   /** Spectral centroid in Hz: low = dark/vowel, high = bright/shriek. */
@@ -110,6 +102,12 @@ export class AudioEngine {
   // Optional per-child vowel baseline (from the mic-check calibration) so a
   // 3-yr-old's high formants aren't misread as noise. Null = use adult default.
   private vowelBaseline: VowelBaseline | null = null;
+
+  // Whether the spectral (phonetic) layer runs. Driven by the caregiver config
+  // ("is any rung enabled?", issue #4) — the generalization of the old
+  // USE_PHONETIC kill-switch. Defaults on so a directly-constructed engine
+  // (e.g. tests) keeps the Increment-1 behavior without extra wiring.
+  private phoneticEnabled = true;
 
   // Smoothed RMS with asymmetric attack/release so the meter snaps up fast but
   // settles down gently (feels alive, not jittery).
@@ -238,6 +236,16 @@ export class AudioEngine {
   }
 
   /**
+   * Enable/disable the spectral (phonetic) layer. The host passes
+   * `anyRungOn(config)` (issue #4): when disabled, `sample()` skips all spectral
+   * work and every phonetic field is 0 — the exact pre-#1 loudness-only frame.
+   * Cheap to flip live (mid-session), which is the config's rollback path.
+   */
+  setPhoneticEnabled(enabled: boolean): void {
+    this.phoneticEnabled = enabled;
+  }
+
+  /**
    * Read one frame. Call once per requestAnimationFrame. Cheap (one pass over a
    * 1024-sample buffer, one over the 512-bin spectrum). Returns a neutral frame
    * until the mic is running.
@@ -325,7 +333,7 @@ export class AudioEngine {
     let lowBand = 0;
     let zcr = 0;
     let vl = 0;
-    if (USE_PHONETIC) {
+    if (this.phoneticEnabled) {
       this.analyser.getFloatFrequencyData(this.freqDb);
       // AnalyserNode hands back dB; convert once to linear magnitude. Empty bins
       // are -Infinity dB → 0 magnitude (no NaN).

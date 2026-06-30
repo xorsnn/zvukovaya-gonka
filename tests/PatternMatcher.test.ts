@@ -106,4 +106,21 @@ describe("PatternMatcher", () => {
     expect(run(0)).toBe(false); // strict: never counts as holding
     expect(run(1)).toBe(true); // easy: threshold + min-hold relaxed enough
   });
+
+  it("AC#3: rung1 gates the vowel grading (off → loudness-only hold)", () => {
+    // A loud but noisy sound (low vowel-likeness): with Rung 1 ON it never
+    // satisfies the vowel hold; with Rung 1 OFF the gate is loudness-only, so any
+    // sustained voicing counts — exactly the pre-#1 (Rung 0) behavior.
+    const noisy = { voiced: true, level: 0.7, vowelLikeness: 0.1, silenceMs: 0 };
+    const rung1On = feed(new PatternMatcher(PATTERN, { assist: 0, rung1: true }), 60, noisy);
+    const rung1Off = feed(new PatternMatcher(PATTERN, { assist: 0, rung1: false }), 60, noisy);
+    expect(rung1On.holdSatisfied).toBe(false);
+    expect(rung1Off.holdSatisfied).toBe(true);
+  });
+
+  it("rung1 defaults on, preserving the shipped Rung-1 behavior", () => {
+    // No `rung1` option → vowel grading, same as Increment 1.
+    const noisy = { voiced: true, level: 0.9, vowelLikeness: 0.1, silenceMs: 0 };
+    expect(feed(new PatternMatcher(PATTERN, { assist: 0 }), 60, noisy).holdSatisfied).toBe(false);
+  });
 });

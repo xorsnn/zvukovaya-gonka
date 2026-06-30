@@ -44,8 +44,9 @@ These are invariants, not nice-to-haves:
    `MIN_FLOOR`.
 2. **No** negative feedback for a "wrong" sound: no buzzer, no red, no
    stop-and-scold. The only signal is cat speed.
-3. A `USE_PHONETIC` kill-switch (`src/audio/AudioEngine.ts`) reverts to the exact
-   shipped loudness-only engine in one flag.
+3. The per-rung config (`src/game/config.ts`) is the rollback: flip every rung
+   off — or flip a single misbehaving one off, live, mid-session — and the game
+   reverts to the exact shipped loudness-only engine.
 4. A **строго ↔ легче** (strict ↔ easy) `assist` slider relaxes every threshold
    continuously — at the easy end it is as forgiving as the old loudness-only
    feel, for a noisy room or a detector miss. It relaxes the gate; it never
@@ -85,7 +86,8 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   rate, spectral flatness / centroid / low-band ratio, and the `vowelLikeness`
   blend. No state, no Web Audio — just `Float32Array` in, number out.
 - **`src/audio/AudioEngine.ts`** — mic capture, the loudness envelope, **and**
-  the spectral feature layer (behind `USE_PHONETIC`). RMS with
+  the spectral feature layer (gated by `setPhoneticEnabled`, driven from the
+  config's "is any rung on?" flag). RMS with
   fast-attack/slow-release smoothing; automatic noise-floor calibration; a
   self-scaling `level`; voiced detection with hysteresis; onset/release edges;
   and per-frame `vowelLikeness`, scored against an optional per-child baseline.
@@ -114,17 +116,28 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   unit of content and now carries an `AcousticPattern` (which ladder rung, how
   long to hold, the required stop gap). The chase mechanic is generic, so adding
   a `[hold]+[stop]` word (дом, кит, …) is just adding data.
+- **`src/game/config.ts`** — the `PhoneticConfig` single source of truth (issue
+  #4): per-rung flags (`rung1`/`rung2`/`rung3`), the `assist` continuum, and a
+  `debug` flag, plus a tiny `localStorage`-backed store. The store never throws —
+  corrupt/partial/private-mode storage all degrade to `DEFAULT_CONFIG`. The
+  engine reads `anyRungOn(config)`; the matcher reads `assist` + `rung1`.
 - **`src/main.ts`** — screen flow (start → mic check → game), the single master
   render loop, mic-permission handling, the graceful denied/error fallback,
-  the per-round matcher wiring, the assist slider, and the vowel-baseline
-  calibration sampled on the mic-check screen.
+  the per-round matcher wiring, the caregiver settings panel (per-rung toggles +
+  assist + debug, persisted live), and the vowel-baseline calibration sampled on
+  the mic-check screen.
 
 ## Caregiver affordances
 
-Small, kid-ignorable controls at the bottom of the game screen:
-**🔊 Послушать** (hear the word modelled by TTS), **⚙ микрофон** (re-run the mic
-check / recalibration), and a **строго ↔ легче** (strict ↔ easy) slider that
-relaxes the phonetic grading for a noisy room.
+Small, kid-ignorable controls at the bottom of the game screen.
+**🔊 Послушать** hears the word modelled by TTS. A **⚙** gear opens a caregiver
+settings panel — hidden by default so a 3-yr-old can't trip it — holding a
+per-rung toggle (**гласные/шум**, **какая гласная**, **согласные/Т**), the
+**строго ↔ легче** (strict ↔ easy) slider that relaxes the phonetic grading for a
+noisy room, an **отладка** (debug) toggle, and **🎤 микрофон** (re-run the mic
+check / recalibration). Every change is saved to `localStorage` and applied live,
+so a misbehaving rung can be switched off mid-session and the setting survives a
+reload.
 
 ## Tests
 
@@ -161,6 +174,7 @@ once). Beyond that, the relevant constants are the noise-floor multipliers in
 `AudioEngine.ts`, the chase constants at the top of `GameView.ts`
 (`MIN_FLOOR`, `CHASE_RATE`, `POUNCE_READY`), and the `VOWEL_WEIGHTS` blend in
 `PhoneticFeatures.ts`. If the spectral layer ever misbehaves on real hardware,
-`USE_PHONETIC = false` in `AudioEngine.ts` reverts to the shipped loudness-only
-engine instantly. The mechanic lives or dies on how immediately the cat reacts
-to the child's voice.
+flip the offending rung off in the ⚙ settings panel (or turn every rung off) to
+revert to the shipped loudness-only engine instantly, mid-session — no reload,
+no rebuild. The mechanic lives or dies on how immediately the cat reacts to the
+child's voice.

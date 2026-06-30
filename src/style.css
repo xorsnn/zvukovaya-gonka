@@ -297,7 +297,7 @@ body {
   animation: pop-in 0.5s cubic-bezier(0.2, 1.6, 0.4, 1) 0.15s both;
 }
 
-/* tiny parent-facing controls row (recalibrate + strict/easy assist) */
+/* tiny parent-facing controls row — just the ⚙ gear; the rest pops above it */
 .parent-controls {
   position: absolute;
   bottom: max(8px, env(safe-area-inset-bottom));
@@ -337,4 +337,68 @@ body {
   width: 84px;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+/* caregiver settings popover (issue #4): per-rung toggles + assist + debug.
+   Hidden behind the ⚙ gear so a 3-yr-old can't trip the switches. */
+.gear-btn {
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 12px;
+}
+.settings-panel {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: max-content;
+  max-width: 78vw;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 16px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.settings-panel[hidden] {
+  display: none;
+}
+.settings-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: rgba(0, 0, 0, 0.3);
+}
+.settings-rungs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-panel label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.settings-panel input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.settings-panel .assist-control {
+  justify-content: center;
 }

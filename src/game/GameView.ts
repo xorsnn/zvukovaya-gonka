@@ -56,7 +56,7 @@ const HOLD_CLOSE_RATE = 3.0;
  *   `POUNCE_READY` yet, and `caught` is a one-shot edge. Instead, once the hold
  *   is satisfied the cat surges to `PRECHASE_CAP`, so by the time the stop fires
  *   it is already poised behind the mouse. This is what makes AC#3 reliable.
- * - With `match === null` (USE_PHONETIC off, or a scene with no matcher): the
+ * - With `match === null` (no rung enabled, or a scene with no matcher): the
  *   EXACT pre-#1 behavior — speed = `max(MIN_VOICED_DRIVE, level)`, catch on any
  *   `onset || release` once `progress >= POUNCE_READY`. This identity is what
  *   makes the kill-switch a true rollback (AC#5).
@@ -155,7 +155,7 @@ export class GameView {
 
   /**
    * Install (or clear) the phonetic matcher for this round. Pass `null` to use
-   * the loudness-only path (USE_PHONETIC off, or a scene without a matcher).
+   * the loudness-only path (no rung enabled, or a scene without a matcher).
    */
   setMatcher(matcher: PatternMatcher | null): void {
     this.matcher = matcher;
