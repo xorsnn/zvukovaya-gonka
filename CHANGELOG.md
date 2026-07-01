@@ -4,6 +4,69 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.6.0] - 2026-07-01
+
+Tug-of-war chase (issue #12): the **vowel runs the cat, the «т» triggers the
+pounce**, with difficulty on the single **строго ↔ легче** (assist) slider. This
+supersedes the inert Rung-3 burst-catch (#11) with a real fast «т» detector and
+turns the chase into a two-body race — while keeping the easy end byte-for-byte
+today's leniency. Still **no ASR / word decoding** — the «т» trigger is the
+*coarse stop class*, never the phoneme. The «т» stop-burst thresholds and the
+default assist are placeholders pending the real-mic tuning pass with the child.
+
+### Added
+- `src/audio/PhoneticFeatures.ts` — `detectStopBurst(env, noiseFloor, dtMs)`: a
+  pure detector for the «т» **closure→burst** shape over a fast-envelope window
+  (a brief near-silent dip released by a transient). Cannot tell «т» from «к»/«п»
+  (place of articulation, out of scope) — it only answers "did a stop release
+  happen?". Unit-tested on canned envelopes (AC#4).
+- `src/audio/AudioEngine.ts` — a **second, much faster envelope** over the raw RMS
+  (fast attack + fast release, `FAST_ENV_*`), independent of the 120 ms-smoothed
+  `voiced` path, feeding `detectStopBurst` → a new `stopBurst` field on
+  `AudioFrame`. Behind the any-rung guard; `false` when the phonetic layer is off.
+- `src/game/GameView.ts` — `MOUSE_FLEE_RATE` + a `strictness` argument to
+  `stepPlay`: net progress is now `catDrive − mouseFlee`, allowed to decay to 0.
+- `src/game/PatternMatcher.ts` — `BURST_REQUIRED_ASSIST` and
+  `VOWEL_MATCH_FLOOR_STRICT`; the catch keys off `frame.stopBurst`.
+- `src/game/types.ts` / `words.ts` — `release.letter` (the taught target
+  consonant; кот/кит → «Т»).
+- `?debug` overlay now shows `stopBurst`, the live net cat-vs-flee drive, and the
+  target letter, for the real-mic tuning pass.
+
+### Changed
+- **Leniency is now ASSIST-SCALED, not absolute.** At the easy end (`assist = 1`)
+  the mouse never flees and progress is monotonic — byte-for-byte today's feel
+  (AC#1); a breath-stop still finishes the catch. Toward the strict end the mouse
+  flees (`strictness · MOUSE_FLEE_RATE`), so a *right* vowel makes the cat gain
+  while a *wrong* vowel or silence lets the mouse escape back to the start (AC#2),
+  and the catch fires **only** on a real «т» burst — running out of breath no
+  longer wins (AC#3). The escape hatch is the slider itself; there is still **no
+  fail screen and no scold** — a child always recovers by making the right sounds.
+  The default assist (0.5) stays lenient (gap finale intact).
+- The Rung-2 wrong-vowel drive floor is assist-scaled (`VOWEL_MATCH_FLOOR` at
+  easy → `VOWEL_MATCH_FLOOR_STRICT` at strict) so a clearly-wrong vowel can
+  net-negative against the flee. The cat's *forward* drive stays positive; the
+  regression comes from the flee, not a zeroed drive.
+- `stepPlay` is a blend between an EASY trajectory (today's monotonic drive +
+  hold-surge) and a STRICT trajectory (the tug-of-war), exact at both endpoints,
+  so AC#1 (easy = byte-for-byte) and AC#5 (`match=null` kill-switch identity) both
+  still hold to the float.
+
+### Removed
+- The inert `voiced`-flag burst-catch: `RUNG3_MIN_CLOSURE_MS` and the
+  `sawClosure`/`onset`-based path in `PatternMatcher`. It keyed off the engine's
+  smoothed `voiced` flag (~387 ms to drop) and never fired on a natural 50–150 ms
+  «т» closure (#11); `detectStopBurst` replaces it. `classifyConsonant` and its
+  debug label are unchanged.
+
+### Notes / deferred
+- **Real-mic tuning is the linchpin (#11/#12, AC#6):** the `STOP_BURST_*`
+  thresholds, `MOUSE_FLEE_RATE`, `BURST_REQUIRED_ASSIST`, and the default assist
+  were set to make the mechanic demonstrable in tests — they must be validated and
+  retuned on a real microphone with the child via `?debug=1`.
+- Out of scope (the planned follow-up): distinguishing «т» from «к»/«п»
+  acoustically; the «дом» («м») case; replace-vs-new-mode rollout.
+
 ## [0.5.1] - 2026-07-01
 
 Post-merge review follow-up for Rung 3 (issue #6). No behavior change: the review

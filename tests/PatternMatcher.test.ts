@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   PatternMatcher,
   VOWEL_MATCH_FLOOR,
-  RUNG3_MIN_CLOSURE_MS,
+  VOWEL_MATCH_FLOOR_STRICT,
+  BURST_REQUIRED_ASSIST,
 } from "../src/game/PatternMatcher";
 import type { AcousticPattern } from "../src/game/types";
 import { makeFrame } from "./_helpers";
@@ -150,7 +151,7 @@ describe("PatternMatcher — Rung 2 vowel identity (#5)", () => {
     expect(off.vowelMatch).toBe(1); // no opinion when rung2 is off
   });
 
-  it("AC#2 / invariant #3: held «о» drives faster than «а», but «а» still moves clearly", () => {
+  it("AC#2 / invariant #3: held «о» drives faster than «а», and «а» still moves", () => {
     const mk = (f: Parameters<typeof makeFrame>[0]) =>
       new PatternMatcher(O_PATTERN, { assist: 0, rung2: true, vowelBaseline: BASE_A }).update(
         makeFrame(f),
@@ -160,7 +161,10 @@ describe("PatternMatcher — Rung 2 vowel identity (#5)", () => {
     const a = mk(HELD_A);
     expect(o.driveQuality).toBeGreaterThan(a.driveQuality); // «о» is faster
     expect(o.driveQuality / a.driveQuality).toBeGreaterThanOrEqual(1.15); // measurably so
-    expect(a.driveQuality).toBeGreaterThan(0.5); // wrong vowel still well above MIN_FLOOR
+    // At strict (#12) the wrong vowel is slowed, but the cat's FORWARD drive is
+    // still positive — any net regression comes from the GameView mouse-flee, not
+    // from a zeroed drive here (leniency is now assist-scaled, not absolute).
+    expect(a.driveQuality).toBeGreaterThan(0);
     expect(o.vowelMatch).toBeGreaterThan(a.vowelMatch);
   });
 
@@ -202,44 +206,61 @@ describe("PatternMatcher — Rung 2 vowel identity (#5)", () => {
     expect(r.vowelMatch).toBe(1);
   });
 
-  it("invariant #3 (floor): a maximally-wrong vowel still keeps VOWEL_MATCH_FLOOR of the drive", () => {
-    // «и» scene, but she makes a low-back «у»-ish sound → vowelMatch ≈ 0. The
-    // bounded floor is the guarantee that even a total mismatch never punishes
-    // the chase below VOWEL_MATCH_FLOOR·quality (a regression that dropped the
-    // floor toward 0 would otherwise pass the rest of the suite).
+  it("invariant #3 (#12): the wrong-vowel floor is ASSIST-SCALED — relaxed at strict, preserved at easy", () => {
+    // «и» scene, but she makes a low-back «у»-ish sound → vowelMatch ≈ 0.
     const I_PATTERN: AcousticPattern = { ...PATTERN, vowel: "и" };
     const WAY_OFF = { voiced: true, level: 1, vowelLikeness: 0.8, f1: 300, f2: 700 };
-    const r = new PatternMatcher(I_PATTERN, { assist: 0, rung2: true, vowelBaseline: BASE_A }).update(
-      makeFrame(WAY_OFF),
-      DT,
-    );
-    expect(r.vowelMatch).toBeLessThan(0.15); // genuinely the wrong vowel
+    const drive = (assist: number) =>
+      new PatternMatcher(I_PATTERN, { assist, rung2: true, vowelBaseline: BASE_A }).update(
+        makeFrame(WAY_OFF),
+        DT,
+      );
+
+    const strict = drive(0);
+    expect(strict.vowelMatch).toBeLessThan(0.15); // genuinely the wrong vowel
     const quality = 0.8 * 1; // effVowel(0.8 @ assist 0) × level
-    expect(r.driveQuality).toBeGreaterThanOrEqual(VOWEL_MATCH_FLOOR * quality - 1e-9);
+    // At strict the floor relaxes to VOWEL_MATCH_FLOOR_STRICT: the wrong vowel
+    // drives BELOW the old easy floor (so the mouse-flee can net it negative — the
+    // #12 tug-of-war), but it is still a positive forward floor, never zero.
+    expect(strict.driveQuality).toBeGreaterThan(0);
+    expect(strict.driveQuality).toBeLessThan(VOWEL_MATCH_FLOOR * quality);
+    expect(strict.driveQuality).toBeGreaterThanOrEqual(VOWEL_MATCH_FLOOR_STRICT * quality - 1e-9);
+
+    // At the easy end the wrong vowel keeps the FULL drive (leniency preserved):
+    // assist→1 lifts the match to 1, so vowel identity stops mattering, exactly as
+    // the rung2-off Rung-1 reference.
+    const easy = drive(1);
+    const ref = new PatternMatcher(PATTERN, { assist: 1 }).update(makeFrame(WAY_OFF), DT);
+    expect(easy.driveQuality).toBeCloseTo(ref.driveQuality, 9);
   });
 });
 
-// --- Rung 3 (#6): consonant class & the real «т» stop ----------------------
+// --- Rung 3 (#6/#12): consonant class & the real «т» stop-burst -------------
 
 // «кот»: a vowel hold then a genuine «т» stop. Same shape as PATTERN, but the
-// release asks for a stop, which is what unlocks Rung 3's burst-catch.
+// release asks for a stop, which is what makes the «т» burst-catch and the
+// strict consonant-gate apply.
 const STOP_PATTERN: AcousticPattern = {
   ...PATTERN,
-  release: { requireGapMs: 120, want: "stop" },
+  release: { requireGapMs: 120, want: "stop", letter: "Т" },
 };
 const HOLD = { voiced: true, level: 0.8, vowelLikeness: 0.85, zcr: 0.03 };
+// A real «т» burst frame, as the engine would surface it (fast-envelope detector).
+const BURST = { voiced: true, level: 0.6, silenceMs: 0, stopBurst: true };
+// A silence frame past the effective gap (the run-out-of-breath finale).
+const gapFrame = (i: number) => makeFrame({ voiced: false, silenceMs: (i + 1) * DT });
 
-describe("PatternMatcher — Rung 3 stop (#6)", () => {
-  it("AC#4: rung3 OFF → no consonant label and no early burst-catch (parity)", () => {
+describe("PatternMatcher — Rung 3 stop (#6/#12)", () => {
+  it("AC#4: rung3 OFF → no consonant label, and a stopBurst is ignored (parity)", () => {
     const m = new PatternMatcher(STOP_PATTERN, { assist: 0 }); // rung3 defaults off
     const held = feed(m, 45, HOLD);
     expect(held.holdSatisfied).toBe(true);
     expect(held.consonantClass).toBe("none");
     expect(held.burstDetected).toBe(false);
-    // A brief closure (< full gap) then a burst onset must NOT catch with rung3
-    // off — only the plain gap path exists, exactly like today.
-    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT);
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    // A stopBurst frame must NOT catch with rung3 off — only the plain gap path
+    // exists, exactly like today. (And at assist 0 a "stop" scene needs the burst,
+    // but with rung3 off there is no stop scene to gate, so the gap still rules.)
+    const r = m.update(makeFrame(BURST), DT);
     expect(r.caught).toBe(false);
     expect(r.burstDetected).toBe(false);
   });
@@ -254,39 +275,58 @@ describe("PatternMatcher — Rung 3 stop (#6)", () => {
       if (r.holdSatisfied) satEver = true;
       if (r.caught) caughtEver = true;
     }
-    for (let i = 0; i < 12; i++) {
-      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
-      if (r.caught) caughtEver = true;
-    }
+    // Even a stopBurst can't catch without a satisfied hold first.
+    const r = m.update(makeFrame(BURST), DT);
+    if (r.caught) caughtEver = true;
     expect(satEver).toBe(false); // the hold is never satisfied by a lone «т»
     expect(caughtEver).toBe(false);
   });
 
-  it("AC#3 / leniency #2: a held vowel then just running out of breath still catches", () => {
-    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
-    const held = feed(m, 45, HOLD);
-    expect(held.holdSatisfied).toBe(true);
-    // Gap only — no burst. The closure alone must still finish the catch.
-    let caught = 0;
-    let burstSeen = false;
-    for (let i = 0; i < 12; i++) {
-      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
-      if (r.caught) caught++;
-      if (r.burstDetected) burstSeen = true;
-    }
-    expect(caught).toBe(1); // gap-only still wins (leniency)
-    expect(burstSeen).toBe(false); // and it was NOT via a burst
+  it("AC#3: at STRICT a real «т» burst catches; a gap (run out of breath) does NOT", () => {
+    // assist 0 ≤ BURST_REQUIRED_ASSIST → the breath-stop is withdrawn, the «т»
+    // burst is required. This is the whole point of #12.
+    const burstM = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    expect(feed(burstM, 45, HOLD).holdSatisfied).toBe(true);
+    const r = burstM.update(makeFrame(BURST), DT);
+    expect(r.burstDetected).toBe(true);
+    expect(r.caught).toBe(true); // the «т» release wins
+
+    const gapM = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(gapM, 45, HOLD);
+    let gapCaught = 0;
+    for (let i = 0; i < 20; i++) if (gapM.update(gapFrame(i), DT).caught) gapCaught++;
+    expect(gapCaught).toBe(0); // no «т» at strict = no win (escape hatch is the slider)
   });
 
-  it("a crisp «т» (closure then a burst) catches on the burst — a bonus path", () => {
-    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
-    feed(m, 45, HOLD);
-    // A brief closure under the full gap, so only the burst can fire the catch.
-    m.update(makeFrame({ voiced: false, silenceMs: 32 }), DT); // < MIN_CLOSURE, no arm
-    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // ≥ MIN_CLOSURE → armed
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+  it("AC#3 / leniency: at EASY a gap still catches, and a «т» burst also catches", () => {
+    const gapM = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
+    feed(gapM, 45, HOLD);
+    let gapCaught = 0;
+    let burstSeen = false;
+    for (let i = 0; i < 12; i++) {
+      const r = gapM.update(gapFrame(i), DT);
+      if (r.caught) gapCaught++;
+      if (r.burstDetected) burstSeen = true;
+    }
+    expect(gapCaught).toBe(1); // running out of breath still wins at easy
+    expect(burstSeen).toBe(false); // and it was NOT via a burst
+
+    const burstM = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
+    feed(burstM, 45, HOLD);
+    const r = burstM.update(makeFrame(BURST), DT);
     expect(r.burstDetected).toBe(true);
-    expect(r.caught).toBe(true); // the «т» release completed the stop early
+    expect(r.caught).toBe(true); // the «т» burst is an early bonus at easy too
+  });
+
+  it("the default assist (0.5) keeps the lenient gap finale", () => {
+    // Default is above BURST_REQUIRED_ASSIST, so the breath-stop still wins — the
+    // common case stays forgiving; only the deliberately-strict end demands the «т».
+    expect(0.5).toBeGreaterThan(BURST_REQUIRED_ASSIST);
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0.5, rung3: true });
+    feed(m, 45, HOLD);
+    let caught = 0;
+    for (let i = 0; i < 12; i++) if (m.update(gapFrame(i), DT).caught) caught++;
+    expect(caught).toBe(1);
   });
 
   it("AC#3: a continuous «р» hum (no stop) holds but NEVER catches", () => {
@@ -300,7 +340,7 @@ describe("PatternMatcher — Rung 3 stop (#6)", () => {
       if (last.caught) caughtEver = true;
     }
     expect(satEver).toBe(true); // a sustained hum reads vowel-like → it holds
-    expect(caughtEver).toBe(false); // but with no closure it never catches
+    expect(caughtEver).toBe(false); // but with no closure/burst it never catches
     expect(last.consonantClass).toBe("sonorant"); // and it's labelled a hum
   });
 
@@ -310,83 +350,56 @@ describe("PatternMatcher — Rung 3 stop (#6)", () => {
     expect(held.consonantClass).toBe("sonorant"); // sustained voiced, no gap yet
     let last = held;
     for (let i = 0; i < 10; i++) {
-      last = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
+      last = m.update(gapFrame(i), DT);
     }
     expect(last.consonantClass).toBe("stop"); // the closure makes it a stop
   });
 
-  it("a 'wrong' consonant class never blocks the catch (graded, never gated)", () => {
-    // Even if the hold tail were hiss-y (the classifier might say 'fricative'),
-    // the gap-only catch still fires — Rung 3 only ADDS a burst path, it never
-    // withholds the catch from a real hold + stop.
-    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+  it("a 'wrong' consonant class never blocks the catch at easy (graded, never gated)", () => {
+    // Even if the hold tail were hiss-y (the classifier might say 'fricative'), the
+    // gap catch still fires at easy — the class label gates nothing.
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
     feed(m, 45, { voiced: true, level: 0.8, vowelLikeness: 0.85, zcr: 0.4 });
     let caught = 0;
-    for (let i = 0; i < 12; i++) {
-      const r = m.update(makeFrame({ voiced: false, silenceMs: (i + 1) * DT }), DT);
-      if (r.caught) caught++;
-    }
+    for (let i = 0; i < 12; i++) if (m.update(gapFrame(i), DT).caught) caught++;
     expect(caught).toBe(1);
   });
 
-  it("rung3 ON but a non-stop ('any') scene adds NO burst-catch — only labels", () => {
-    // PATTERN.release.want is undefined → "any", so `rung3Stop` is false and the
-    // burst path must stay disabled even with rung3 on. Guards the `want === "stop"`
-    // half of the rung3Stop check: dropping it would arm burst-catch on every
-    // word and silently change non-«т» finales.
+  it("rung3 ON but a non-stop ('any') scene: stopBurst ignored, gap ALWAYS wins", () => {
+    // PATTERN.release.want is undefined → "any", so `rung3Stop` is false: the burst
+    // path stays off AND the gap is never withdrawn (we don't demand a burst a word
+    // lacks), even at assist 0. Guards the `want === "stop"` half of the gate.
     const m = new PatternMatcher(PATTERN, { assist: 0, rung3: true });
     feed(m, 45, HOLD);
-    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // would arm on a stop scene
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    const r = m.update(makeFrame(BURST), DT);
     expect(r.burstDetected).toBe(false); // no burst path on an "any" scene
-    expect(r.caught).toBe(false); // and the 0 ms gap can't catch either
     expect(r.consonantClass).not.toBe("none"); // but rung3 still labels the window
-  });
-
-  it("a re-onset after a too-short closure (< MIN_CLOSURE) does NOT burst-catch", () => {
-    // The "no-fire" half of arming: with rung3 ON and a closure below
-    // RUNG3_MIN_CLOSURE_MS, `sawClosure` stays false so a following onset is not a
-    // burst. (AC#4 only exercises the OFF case, where the whole block is dead.)
-    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
-    feed(m, 45, HOLD);
-    m.update(makeFrame({ voiced: false, silenceMs: 32 }), DT); // < 50 → never arms
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
-    expect(r.burstDetected).toBe(false);
-    expect(r.caught).toBe(false);
-  });
-
-  it("arms the burst at exactly RUNG3_MIN_CLOSURE_MS (the `>=` boundary)", () => {
-    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
-    feed(m, 45, HOLD);
-    m.update(makeFrame({ voiced: false, silenceMs: RUNG3_MIN_CLOSURE_MS }), DT); // exactly 50 → arms
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
-    expect(r.burstDetected).toBe(true);
-    expect(r.caught).toBe(true);
+    // The plain gap still finishes the catch, strict assist and all.
+    let caught = 0;
+    for (let i = 0; i < 12; i++) if (m.update(gapFrame(i), DT).caught) caught++;
+    expect(caught).toBe(1);
   });
 
   it("the burst-catch is edge-triggered exactly once (done latches)", () => {
     const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
     feed(m, 45, HOLD);
-    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // arm
     let caught = 0;
     for (let i = 0; i < 6; i++) {
-      // first frame bursts; the rest must NOT re-fire the catch
-      const r = m.update(makeFrame({ voiced: true, onset: i === 0, silenceMs: 0 }), DT);
+      // every frame carries stopBurst; the catch must fire only once.
+      const r = m.update(makeFrame(BURST), DT);
       if (r.caught) caught++;
     }
     expect(caught).toBe(1);
   });
 
-  it("reset() clears the Rung-3 release window and arm state between rounds", () => {
-    // GameView.reset() calls matcher.reset() each round; a stale `sawClosure` or
-    // `recent` must not leak a spurious burst-catch into the next round.
+  it("reset() clears the hold + release window between rounds", () => {
+    // GameView.reset() calls matcher.reset() each round; a stale hold or `recent`
+    // window must not leak a spurious catch into the next round.
     const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
     feed(m, 45, HOLD);
-    m.update(makeFrame({ voiced: false, silenceMs: 64 }), DT); // arms sawClosure
     m.reset();
-    const r = m.update(makeFrame({ voiced: true, onset: true, silenceMs: 0 }), DT);
+    const r = m.update(makeFrame(BURST), DT);
     expect(r.consonantClass).toBe("none"); // window emptied (1 frame < minVoiced)
-    expect(r.burstDetected).toBe(false); // sawClosure cleared
-    expect(r.caught).toBe(false); // hold reset too → nothing to catch
+    expect(r.caught).toBe(false); // hold reset → a burst has nothing to complete
   });
 });

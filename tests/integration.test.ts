@@ -167,33 +167,39 @@ describe("AudioEngine → PatternMatcher Rung 2 integration (#5)", () => {
   });
 });
 
-// --- Rung 3 (#6): the real «т» stop through the REAL engine + matcher --------
+// --- Rung 3 (#6/#12): the real «т» stop through the REAL engine + matcher -----
 
 const STOP_PATTERN: AcousticPattern = {
   ...PATTERN,
-  release: { requireGapMs: 120, want: "stop" },
+  release: { requireGapMs: 120, want: "stop", letter: "Т" },
 };
 
 /**
  * Drive a held vowel, then a scripted tail (closures / bursts), through the real
- * AudioEngine + a Rung-3 matcher the way the game does. Returns whether the hold
- * satisfied and whether the catch fired.
+ * AudioEngine + a Rung-3 matcher the way the game does — so the «т» burst is
+ * detected by the engine's FAST envelope, not faked on the frame. Returns whether
+ * the hold satisfied, whether the catch fired, and whether the engine ever
+ * surfaced a `stopBurst` during the tail.
  */
 function runRung3(
   hold: { time: Float32Array; freqDb: Float32Array },
   holdFrames: number,
   tail: Array<{ time: Float32Array; freqDb: Float32Array; frames: number }>,
-): { holdSatisfied: boolean; caught: boolean } {
+  assist = 0,
+): { holdSatisfied: boolean; caught: boolean; sawStopBurst: boolean } {
   const analyser = new FakeAnalyser();
   const engine = new AudioEngine({ analyser, sampleRate: SR });
-  const matcher = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+  const matcher = new PatternMatcher(STOP_PATTERN, { assist, rung3: true });
 
   let t = 0;
   let holdSatisfied = false;
   let caught = false;
-  const step = (frames: number) => {
+  let sawStopBurst = false;
+  const step = (frames: number, watchBurst = false) => {
     for (let i = 0; i < frames; i++) {
-      const m = matcher.update(engine.sample(t), STEP);
+      const frame = engine.sample(t);
+      if (watchBurst && frame.stopBurst) sawStopBurst = true;
+      const m = matcher.update(frame, STEP);
       if (m.holdSatisfied) holdSatisfied = true;
       if (m.caught) caught = true;
       t += STEP;
@@ -212,34 +218,43 @@ function runRung3(
   for (const ph of tail) {
     analyser.time = ph.time;
     analyser.freqDb = ph.freqDb;
-    step(ph.frames);
+    step(ph.frames, true);
   }
-  return { holdSatisfied, caught };
+  return { holdSatisfied, caught, sawStopBurst };
 }
 
 const O_HOLD = { time: sineTime(300, 0.3), freqDb: tonalSpectrumDb(7) };
 const SILENCE = { time: new Float32Array(1024), freqDb: silentSpectrumDb(), frames: 60 };
+// A SHORT «т» closure (≈96 ms) — within the 50–150 ms the fast detector expects,
+// unlike a full run-out-of-breath gap.
+const CLOSURE = { time: new Float32Array(1024), freqDb: silentSpectrumDb(), frames: 6 };
 const BURST = { time: noiseTime(0.3), freqDb: flatSpectrumDb(-40), frames: 4 };
+// «ко-о-о-т»: hold → a brief closure → the «т» release burst → the word ends.
+const KOT_TAIL = [CLOSURE, BURST, { ...SILENCE, frames: 30 }];
 
-describe("AudioEngine → PatternMatcher Rung 3 integration (#6)", () => {
-  it("«ко-о-о» then simply stopping (gap only) catches — leniency holds with Rung 3", () => {
-    const r = runRung3(O_HOLD, 60, [SILENCE]);
+describe("AudioEngine → PatternMatcher Rung 3 integration (#6/#12)", () => {
+  it("«ко-о-о-т» (hold → closure → burst) fires a real stopBurst and catches at STRICT", () => {
+    const r = runRung3(O_HOLD, 60, KOT_TAIL, 0); // strict: the «т» is required
     expect(r.holdSatisfied).toBe(true);
-    expect(r.caught).toBe(true); // running out of breath still wins
+    expect(r.sawStopBurst).toBe(true); // the engine's fast detector actually fired
+    expect(r.caught).toBe(true); // and the «т» release won the catch
   });
 
-  it("«ко-о-о-т» (hold → closure → burst) catches the mouse", () => {
-    const r = runRung3(O_HOLD, 60, [
-      { ...SILENCE, frames: 30 }, // the «т» closure
-      BURST, // the «т» release burst
-      { ...SILENCE, frames: 30 }, // word ends
-    ]);
+  it("AC#3: «ко-о-о» then just stopping (no «т») does NOT catch at STRICT", () => {
+    const r = runRung3(O_HOLD, 60, [SILENCE], 0);
     expect(r.holdSatisfied).toBe(true);
-    expect(r.caught).toBe(true);
+    expect(r.sawStopBurst).toBe(false); // no burst — just a long silence
+    expect(r.caught).toBe(false); // no «т» at strict = no win
+  });
+
+  it("AC#3 / leniency: «ко-о-о» then just stopping (no «т») DOES catch at EASY", () => {
+    const r = runRung3(O_HOLD, 60, [SILENCE], 1);
+    expect(r.holdSatisfied).toBe(true);
+    expect(r.caught).toBe(true); // running out of breath still wins at the easy end
   });
 
   it("AC#3: a continuous «о» hum with no stop holds but never catches", () => {
-    const r = runRung3(O_HOLD, 150, []); // long hold, no closure at all
+    const r = runRung3(O_HOLD, 150, [], 0); // long hold, no closure/burst at all
     expect(r.holdSatisfied).toBe(true);
     expect(r.caught).toBe(false);
   });

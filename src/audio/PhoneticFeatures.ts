@@ -495,3 +495,112 @@ export function classifyConsonant(frames: ReleaseFrame[]): ConsonantClass {
   // Sustained voiced, no closing gap → a continuous sonorant hum.
   return "sonorant";
 }
+
+// ===========================================================================
+// Rung 3 (#6/#12) — the REAL fast «т» stop-burst detector.
+//
+// The classifier above LABELS a window, but its inputs (`voiced`/`zcr`) ride the
+// engine's hysteretic, 120 ms-smoothed path — too slow to see a natural «т»
+// closure (50–150 ms), which is why the original burst-catch was inert on real
+// speech (#11). This detector works instead over a FAST envelope (a fast-attack/
+// fast-release follower over the raw RMS, surfaced by the engine), so the brief
+// "energy dip (closure) → transient burst" of a «т» release is visible within a
+// few frames. STILL NOT recognition: it reads the envelope *shape*, never the
+// phoneme, and cannot tell «т» from «к»/«п» (place of articulation — out of
+// scope, the banned ASR territory). It only answers "did a stop release just
+// happen?". Pure: feed it a canned envelope array in a test (AC#4, #12).
+// ===========================================================================
+
+/** A recent-envelope peak below `noiseFloor × this` is too quiet to be a real
+ * vowel, so there is nothing a stop could be releasing — bail. Mirrors the
+ * engine's `onThreshold` multiplier so "loud enough to count" is one idea. */
+export const STOP_BURST_LOUD_RATIO = 2.2;
+/** A frame at/below `peak × this` counts as part of the closure (the near-silent
+ * dip). Relative to the recent peak (not an absolute level) so the detector is
+ * robust to how loud the child is. */
+export const STOP_BURST_DIP_FRACTION = 0.3;
+/** The release frame must rise back to at least `peak × this` (and clear the
+ * loud floor) to read as a burst. Above {@link STOP_BURST_DIP_FRACTION} so the
+ * closure→burst edge is unambiguous; a «т» burst is a real transient, not a
+ * wobble in the tail. */
+export const STOP_BURST_RISE_FRACTION = 0.45;
+/** A closure shorter than this (ms) is a flicker, not a real stop. */
+export const STOP_BURST_MIN_CLOSURE_MS = 40;
+/** A closure longer than this (ms) is a pause / a new word, not a «т» — so a
+ * "vowel … long silence … vowel again" never reads as a single stop release. */
+export const STOP_BURST_MAX_CLOSURE_MS = 220;
+
+/** Tunable bounds for {@link detectStopBurst} (all optional; omit for the
+ * exported defaults). Surfaced so the real-mic tuning pass (#12, AC#6) can sweep
+ * them without editing the module. */
+export interface StopBurstOpts {
+  loudRatio?: number;
+  dipFraction?: number;
+  riseFraction?: number;
+  minClosureMs?: number;
+  maxClosureMs?: number;
+}
+
+/**
+ * detectStopBurst — does the LATEST frame of `env` complete a «т»-like
+ * closure-then-burst? Pure and allocation-free.
+ *
+ * `env` is the recent fast-envelope history, oldest first / newest last; the
+ * engine keeps the last ~20 frames (≈0.3 s). `noiseFloor` and `dtMs` come from
+ * the engine. The shape we require, reading backwards from the newest frame:
+ *   1. a BURST — the newest frame rises through `peak × riseFraction` (its
+ *      predecessor was below it): a fresh transient, not a steady tone.
+ *   2. a CLOSURE — an unbroken run of near-silent frames (≤ `peak × dipFraction`)
+ *      immediately before the burst, whose length sits in
+ *      [`minClosureMs`, `maxClosureMs`].
+ *   3. a VOWEL — the frame just before the closure was loud (≥ the rise level):
+ *      the held sound the «т» released from.
+ *
+ * A sustained vowel or a continuous hum has no closure (step 2 fails); a plain
+ * run-out-of-breath has the closure but never rises again (step 1 fails) — so
+ * neither fires (AC#4). The engine exposes the result as `frame.stopBurst`.
+ */
+export function detectStopBurst(
+  env: ArrayLike<number>,
+  noiseFloor: number,
+  dtMs: number,
+  opts?: StopBurstOpts,
+): boolean {
+  const n = env.length;
+  if (n < 3) return false;
+
+  let peak = 0;
+  for (let i = 0; i < n; i++) if (env[i] > peak) peak = env[i];
+  const loud = noiseFloor * (opts?.loudRatio ?? STOP_BURST_LOUD_RATIO);
+  if (peak < loud) return false; // nothing loud enough to be a released vowel
+
+  const dip = peak * (opts?.dipFraction ?? STOP_BURST_DIP_FRACTION);
+  const rise = Math.max(loud, peak * (opts?.riseFraction ?? STOP_BURST_RISE_FRACTION));
+  const minMs = opts?.minClosureMs ?? STOP_BURST_MIN_CLOSURE_MS;
+  const maxMs = opts?.maxClosureMs ?? STOP_BURST_MAX_CLOSURE_MS;
+
+  const last = n - 1;
+  // 1) burst: a rising edge through `rise` on the newest frame.
+  if (!(env[last] >= rise && env[last - 1] < rise)) return false;
+
+  // 2) closure: consecutive near-silent frames immediately before the burst.
+  let k = last - 1;
+  let closed = 0;
+  while (k >= 0 && env[k] <= dip) {
+    closed++;
+    k--;
+  }
+  if (closed === 0) return false;
+  const closureMs = closed * dtMs;
+  if (closureMs < minMs || closureMs > maxMs) return false;
+
+  // 3) vowel: a loud frame somewhere before the closure (the held sound the «т»
+  // released from). Scan back rather than checking only the adjacent frame — the
+  // one or two frames between the steady vowel and the closure are transitional
+  // (the envelope decaying), so they sit below `rise`. No loud frame before the
+  // closure → a burst out of nowhere, not a stop release (rejects a lone «т»).
+  for (let j = k; j >= 0; j--) {
+    if (env[j] >= rise) return true;
+  }
+  return false;
+}

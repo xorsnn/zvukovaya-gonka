@@ -32,14 +32,24 @@ export interface AcousticPattern {
     /** Required near-silence gap (ms) after the hold to fire the catch. */
     requireGapMs: number;
     /**
-     * Rung 3 (#6): what the final action should be. `"stop"` asks for a genuine
-     * stop consonant («кот»/«кит» → «т»: a closure, optionally a burst);
-     * `"any"` (the default when absent) keeps today's behavior — any near-silence
-     * gap finalizes the catch. ADDITIVE: only consulted when `config.rung3` is
-     * on, and even then it only *adds* an earlier burst-catch path — it never
-     * blocks the gap-only catch (simply running out of breath still wins).
+     * Rung 3 (#6/#12): what the final action should be. `"stop"` asks for a
+     * genuine stop consonant («кот»/«кит» → «т»: a closure then a burst); `"any"`
+     * (the default when absent) keeps today's behavior — any near-silence gap
+     * finalizes the catch. Consulted only when `config.rung3` is on. Toward the
+     * EASY end it still only *adds* an earlier «т» burst-catch (a breath-stop also
+     * wins); toward the STRICT end the «т» burst becomes REQUIRED (#12) — the
+     * escape hatch is the assist slider, not a fail screen.
      */
     want?: "stop" | "any";
+    /**
+     * Rung 3 (#12): the target consonant grapheme shown for teaching (кот/кит →
+     * «Т»). It is NOT decoded acoustically — the trigger is the letter's coarse
+     * CLASS (a stop burst), since telling «т» from «к»/«п» (place of articulation)
+     * is the banned ASR territory. Display/teaching + the `?debug` overlay use it;
+     * it mirrors {@link WordScene.burstPart} but lives with the acoustic pattern so
+     * the matcher/debug layer can name the target without reaching into UI fields.
+     */
+    letter?: string;
   };
   /**
    * Rung 2 (#5): the nucleus vowel this scene asks for (кот → «о», кит → «и»).

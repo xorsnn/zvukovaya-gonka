@@ -34,6 +34,7 @@ import {
   zeroCrossingRate,
   vowelLikeness,
   estimateFormants,
+  detectStopBurst,
   type VowelBaseline,
 } from "./PhoneticFeatures";
 
@@ -83,6 +84,11 @@ export interface AudioFrame {
   f1: number;
   /** Second formant estimate in Hz (Rung 2, #5); 0 when off or silent. */
   f2: number;
+  /** Rung 3 (#12): true on the single frame a real «т» stop-burst — a brief
+   * energy dip (closure) then a transient — completes, read from a FAST envelope
+   * independent of the 120 ms-smoothed `voiced` path. False when the phonetic
+   * layer is off. The matcher consumes this for the strict consonant-gated catch. */
+  stopBurst: boolean;
 }
 
 export type MicStatus =
@@ -91,6 +97,16 @@ export type MicStatus =
   | "running"
   | "denied"
   | "error";
+
+/** Fast-envelope attack time constant (ms) for the stop-burst detector (#12) —
+ * short, so a «т» release transient registers within a frame or two. */
+const FAST_ENV_ATTACK_MS = 4;
+/** Fast-envelope release time constant (ms) — short, so a «т» closure collapses
+ * the envelope within ~50 ms instead of the 120 ms-smoothed path's ~387 ms. */
+const FAST_ENV_RELEASE_MS = 18;
+/** How many recent `fastEnv` frames the detector inspects (~0.3 s at 60 fps) —
+ * enough to hold a vowel, a 50–150 ms closure, and the burst together. */
+const FAST_ENV_HIST_FRAMES = 20;
 
 export class AudioEngine {
   status: MicStatus = "idle";
@@ -127,6 +143,15 @@ export class AudioEngine {
   // Smoothed RMS with asymmetric attack/release so the meter snaps up fast but
   // settles down gently (feels alive, not jittery).
   private smoothed = 0;
+
+  // A SECOND, much faster envelope used only for the «т» stop-burst detector
+  // (#12). Fast attack + fast release (a few ms each) so it tracks a 50–150 ms
+  // closure-then-burst that the 120 ms-release `smoothed`/`voiced` path is far too
+  // sluggish to see (#11). Kept entirely separate so it can't perturb `level`,
+  // `voiced`, or any pre-#12 frame field. Only updated when the phonetic layer is on.
+  private fastEnv = 0;
+  /** Rolling history of `fastEnv` (oldest→newest) the pure detector reads. */
+  private fastEnvHist: number[] = [];
 
   // Adaptive noise floor. Starts pessimistic, calibrates down quickly to the
   // real ambient level, then tracks slow upward drift in room noise.
@@ -366,6 +391,7 @@ export class AudioEngine {
     let vl = 0;
     let f1 = 0;
     let f2 = 0;
+    let stopBurst = false;
     if (this.phoneticEnabled) {
       this.analyser.getFloatFrequencyData(this.freqDb);
       // AnalyserNode hands back dB; convert once to linear magnitude. Empty bins
@@ -390,6 +416,16 @@ export class AudioEngine {
           this.formantEnv,
         ));
       }
+
+      // Fast envelope for the «т» stop-burst (#12). Tracks `rawRms`, NOT the
+      // 120 ms-smoothed `rms`, so a brief closure-then-burst is visible. Then ask
+      // the pure detector whether the latest frame completes that shape.
+      const fAttack = 1 - Math.exp(-dt / FAST_ENV_ATTACK_MS);
+      const fRelease = 1 - Math.exp(-dt / FAST_ENV_RELEASE_MS);
+      this.fastEnv += (rawRms - this.fastEnv) * (rawRms > this.fastEnv ? fAttack : fRelease);
+      this.fastEnvHist.push(this.fastEnv);
+      if (this.fastEnvHist.length > FAST_ENV_HIST_FRAMES) this.fastEnvHist.shift();
+      stopBurst = detectStopBurst(this.fastEnvHist, this.noiseFloor, dt);
     }
 
     return {
@@ -408,6 +444,7 @@ export class AudioEngine {
       vowelLikeness: vl,
       f1,
       f2,
+      stopBurst,
     };
   }
 
@@ -429,6 +466,7 @@ export class AudioEngine {
       vowelLikeness: 0,
       f1: 0,
       f2: 0,
+      stopBurst: false,
     };
   }
 

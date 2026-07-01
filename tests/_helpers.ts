@@ -23,6 +23,7 @@ export function makeFrame(p: Partial<AudioFrame> = {}): AudioFrame {
     vowelLikeness: 0,
     f1: 0,
     f2: 0,
+    stopBurst: false,
     ...p,
   };
 }
