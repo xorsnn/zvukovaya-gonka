@@ -248,10 +248,21 @@ describe("AudioEngine → PatternMatcher Rung 3 integration (#6/#12)", () => {
     expect(r.caught).toBe(false); // no «т» at strict = no win
   });
 
-  it("AC#3 / leniency: «ко-о-о» then just stopping (no «т») DOES catch at EASY", () => {
+  it("AC#1 (#18): «ко-о-о» then just stopping (no «т») does NOT catch — even at EASY", () => {
+    // Two-phase win (#18): the run-out-of-breath pause no longer wins at ANY slider
+    // position — the child must produce the «т». At easy the «т» is just easier to
+    // detect (looser burstOptsForAssist), not optional.
     const r = runRung3(O_HOLD, 60, [SILENCE], 1);
     expect(r.holdSatisfied).toBe(true);
-    expect(r.caught).toBe(true); // running out of breath still wins at the easy end
+    expect(r.sawStopBurst).toBe(false); // just silence — no «т» ever fired
+    expect(r.caught).toBe(false); // and so the round never completes on a pause
+  });
+
+  it("AC#2 (#18): «ко-о-о-т» catches at EASY too — the real «т» is the only finish", () => {
+    const r = runRung3(O_HOLD, 60, KOT_TAIL, 1);
+    expect(r.holdSatisfied).toBe(true);
+    expect(r.sawStopBurst).toBe(true);
+    expect(r.caught).toBe(true);
   });
 
   it("AC#3: a continuous «о» hum with no stop holds but never catches", () => {

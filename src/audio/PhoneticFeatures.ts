@@ -666,3 +666,34 @@ export function detectStopBurst(
   }
   return false;
 }
+
+/**
+ * burstOptsForAssist — map the строго↔легче slider (#18) onto the «т» detector's
+ * tunable bounds, so the SAME dial that shortens the vowel hold to arm also
+ * loosens the «т» itself. This is the genuine easier path for the «т» that
+ * REPLACES the retired pause-win escape hatch: with the run-out-of-breath finale
+ * gone on a stop scene, a struggling child always has a gentler «т» to reach for,
+ * so there is still no fail state.
+ *
+ * Monotonic toward легче (`assist` → 1): every knob gets at-least-as-forgiving —
+ * a lower `loudRatio` (a quieter released vowel still counts), a higher
+ * `dipFraction` (a shallower dip reads as the closure), a lower `riseFraction`
+ * (a gentler transient reads as the burst), and a WIDER closure window
+ * (`minClosureMs` ↓, `maxClosureMs` ↑). Toward строго each tightens back to a
+ * crisper «т». At the default 0.5 it sits ≈ the exported `STOP_BURST_*` defaults.
+ *
+ * Pure and allocation-cheap (one object). The endpoints are PLACEHOLDERS, tuned
+ * live on a real mic with the child (project convention, #11/#12 tail), not
+ * finalized by the monotonicity unit test alone.
+ */
+export function burstOptsForAssist(assist: number): StopBurstOpts {
+  const a = assist < 0 ? 0 : assist > 1 ? 1 : assist;
+  const mix = (strict: number, easy: number): number => strict + (easy - strict) * a;
+  return {
+    loudRatio: mix(2.6, 1.8),
+    dipFraction: mix(0.25, 0.4),
+    riseFraction: mix(0.55, 0.35),
+    minClosureMs: mix(50, 25),
+    maxClosureMs: mix(180, 300),
+  };
+}

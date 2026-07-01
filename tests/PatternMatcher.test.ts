@@ -3,8 +3,10 @@ import {
   PatternMatcher,
   VOWEL_MATCH_FLOOR,
   VOWEL_MATCH_FLOOR_STRICT,
-  BURST_REQUIRED_ASSIST,
+  armedBurst,
+  ARMED_BURST_VOWEL_FLOOR,
 } from "../src/game/PatternMatcher";
+import { ZCR_HIGH } from "../src/audio/PhoneticFeatures";
 import type { AcousticPattern } from "../src/game/types";
 import { makeFrame } from "./_helpers";
 
@@ -283,8 +285,8 @@ describe("PatternMatcher — Rung 3 stop (#6/#12)", () => {
   });
 
   it("AC#3: at STRICT a real «т» burst catches; a gap (run out of breath) does NOT", () => {
-    // assist 0 ≤ BURST_REQUIRED_ASSIST → the breath-stop is withdrawn, the «т»
-    // burst is required. This is the whole point of #12.
+    // On a stop scene the «т» burst is required and the breath-stop never wins —
+    // now true at every assist (#18); this checks the строго end specifically.
     const burstM = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
     expect(feed(burstM, 45, HOLD).holdSatisfied).toBe(true);
     const r = burstM.update(makeFrame(BURST), DT);
@@ -298,35 +300,42 @@ describe("PatternMatcher — Rung 3 stop (#6/#12)", () => {
     expect(gapCaught).toBe(0); // no «т» at strict = no win (escape hatch is the slider)
   });
 
-  it("AC#3 / leniency: at EASY a gap still catches, and a «т» burst also catches", () => {
+  it("AC#1 (#18): on a stop scene a pause NEVER wins — even at EASY; only a «т» does", () => {
+    // Two-phase win (#18): the run-out-of-breath gap is dropped on a stop scene at
+    // EVERY slider position — a pure pause parks at the checkpoint forever. The «т»
+    // burst is the only finish (an EARLIER win, not a bonus on top of a gap).
     const gapM = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
     feed(gapM, 45, HOLD);
     let gapCaught = 0;
     let burstSeen = false;
-    for (let i = 0; i < 12; i++) {
-      const r = gapM.update(gapFrame(i), DT);
+    for (let i = 0; i < 60; i++) {
+      const r = gapM.update(gapFrame(i), DT); // a long silence, no «т»
       if (r.caught) gapCaught++;
       if (r.burstDetected) burstSeen = true;
     }
-    expect(gapCaught).toBe(1); // running out of breath still wins at easy
-    expect(burstSeen).toBe(false); // and it was NOT via a burst
+    expect(gapCaught).toBe(0); // the pause never wins, at easy or anywhere
+    expect(burstSeen).toBe(false); // and no phantom burst fired on plain silence
 
     const burstM = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
     feed(burstM, 45, HOLD);
     const r = burstM.update(makeFrame(BURST), DT);
     expect(r.burstDetected).toBe(true);
-    expect(r.caught).toBe(true); // the «т» burst is an early bonus at easy too
+    expect(r.caught).toBe(true); // the «т» burst is the finish at easy too
   });
 
-  it("the default assist (0.5) keeps the lenient gap finale", () => {
-    // Default is above BURST_REQUIRED_ASSIST, so the breath-stop still wins — the
-    // common case stays forgiving; only the deliberately-strict end demands the «т».
-    expect(0.5).toBeGreaterThan(BURST_REQUIRED_ASSIST);
+  it("AC#1 (#18): the default assist (0.5) also requires the «т» — a pause never wins", () => {
+    // rung3 now ships ON by default; the default slider no longer has a pause-win.
+    // A pure pause parks forever; a «т» finishes. The gentler path is a LOOSER «т»
+    // (burstOptsForAssist), not the retired breath-stop.
     const m = new PatternMatcher(STOP_PATTERN, { assist: 0.5, rung3: true });
     feed(m, 45, HOLD);
-    let caught = 0;
-    for (let i = 0; i < 12; i++) if (m.update(gapFrame(i), DT).caught) caught++;
-    expect(caught).toBe(1);
+    let gapCaught = 0;
+    for (let i = 0; i < 30; i++) if (m.update(gapFrame(i), DT).caught) gapCaught++;
+    expect(gapCaught).toBe(0); // no «т» = no win, even at the default
+
+    const burstM = new PatternMatcher(STOP_PATTERN, { assist: 0.5, rung3: true });
+    feed(burstM, 45, HOLD);
+    expect(burstM.update(makeFrame(BURST), DT).caught).toBe(true);
   });
 
   it("AC#3: a continuous «р» hum (no stop) holds but NEVER catches", () => {
@@ -355,14 +364,13 @@ describe("PatternMatcher — Rung 3 stop (#6/#12)", () => {
     expect(last.consonantClass).toBe("stop"); // the closure makes it a stop
   });
 
-  it("a 'wrong' consonant class never blocks the catch at easy (graded, never gated)", () => {
+  it("a 'wrong' consonant class never blocks the «т» catch (graded, never gated)", () => {
     // Even if the hold tail were hiss-y (the classifier might say 'fricative'), the
-    // gap catch still fires at easy — the class label gates nothing.
+    // «т» burst still catches — the class label gates nothing (#18: the finish is
+    // now the burst, not the retired gap).
     const m = new PatternMatcher(STOP_PATTERN, { assist: 1, rung3: true });
     feed(m, 45, { voiced: true, level: 0.8, vowelLikeness: 0.85, zcr: 0.4 });
-    let caught = 0;
-    for (let i = 0; i < 12; i++) if (m.update(gapFrame(i), DT).caught) caught++;
-    expect(caught).toBe(1);
+    expect(m.update(makeFrame(BURST), DT).caught).toBe(true);
   });
 
   it("rung3 ON but a non-stop ('any') scene: stopBurst ignored, gap ALWAYS wins", () => {
@@ -401,5 +409,116 @@ describe("PatternMatcher — Rung 3 stop (#6/#12)", () => {
     const r = m.update(makeFrame(BURST), DT);
     expect(r.consonantClass).toBe("none"); // window emptied (1 frame < minVoiced)
     expect(r.caught).toBe(false); // hold reset → a burst has nothing to complete
+  });
+});
+
+// --- #18: the two-phase «т» win (arm → checkpoint → «т» only) ----------------
+
+// A pause-tolerant armed «т»: after a long pause the engine's fast `stopBurst`
+// can't fire (the arming vowel is gone from its ~0.3 s window), so the child's «т»
+// arrives as a fresh NON-vowel-like onset instead. And a vowel RE-onset that must
+// NOT win (AC#4): loud, onset, but tonal (low zcr, high vowelLikeness).
+const T_REONSET = { voiced: true, onset: true, vowelLikeness: 0.08, zcr: 0.45, silenceMs: 0 };
+const VOWEL_REONSET = { voiced: true, onset: true, vowelLikeness: 0.85, zcr: 0.03, silenceMs: 0 };
+
+describe("PatternMatcher — two-phase «т» win (#18)", () => {
+  it("AC#3: arm → ≥3 s of silence → a «т» still completes (pause-tolerant)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    expect(feed(m, 45, HOLD).holdSatisfied).toBe(true); // armed at the checkpoint
+    // ~3.2 s of pure silence: parks, never wins.
+    let caughtDuringSilence = 0;
+    for (let i = 0; i < 200; i++) if (m.update(gapFrame(i), DT).caught) caughtDuringSilence++;
+    expect(caughtDuringSilence).toBe(0);
+    // Now the «т» arrives as a fresh non-vowel-like onset (no stopBurst — the vowel
+    // is long gone from the fast-env window). It STILL completes the round.
+    const r = m.update(makeFrame(T_REONSET), DT);
+    expect(r.burstDetected).toBe(true);
+    expect(r.caught).toBe(true);
+  });
+
+  it("AC#4: arm → silence → re-starting the VOWEL does NOT complete (no false-fire)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    feed(m, 45, HOLD);
+    feed(m, 20, { voiced: false, silenceMs: 320 }); // a pause since the arm
+    // Re-onset of a clean vowel: an onset, but tonal — the guard rejects it.
+    let caughtEver = false;
+    if (m.update(makeFrame(VOWEL_REONSET), DT).caught) caughtEver = true;
+    for (let i = 0; i < 40; i++) {
+      if (m.update(makeFrame({ ...VOWEL_REONSET, onset: false }), DT).caught) caughtEver = true;
+    }
+    expect(caughtEver).toBe(false); // the vowel re-onset never wins — only a «т»
+  });
+
+  it("AC#5: a «т» BEFORE the hold is satisfied never completes the round", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    const held = feed(m, 20, HOLD); // ~320 ms < the 600 ms min → not yet armed
+    expect(held.holdSatisfied).toBe(false);
+    const r = m.update(makeFrame(BURST), DT); // a real «т», but too early
+    expect(r.caught).toBe(false);
+    expect(r.burstDetected).toBe(false); // gated on the arm
+  });
+
+  it("AC#2: a real «т» burst completes at EVERY slider position", () => {
+    for (const assist of [0, 0.3, 0.5, 0.7, 1]) {
+      const m = new PatternMatcher(STOP_PATTERN, { assist, rung3: true });
+      feed(m, 45, HOLD);
+      expect(m.update(makeFrame(BURST), DT).caught).toBe(true);
+    }
+  });
+
+  it("armedForBurst flags the parked checkpoint only on a rung3 stop scene", () => {
+    // A stop scene, rung3 on: armedForBurst latches with the hold.
+    const stop = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    expect(stop.update(makeFrame(HOLD), DT).armedForBurst).toBe(false); // not held yet
+    expect(feed(stop, 45, HOLD).armedForBurst).toBe(true); // parked, waiting for «т»
+    // A non-stop scene never arms-for-burst (the gap still finishes it).
+    const anyScene = new PatternMatcher(PATTERN, { assist: 0, rung3: true });
+    expect(feed(anyScene, 45, HOLD).armedForBurst).toBe(false);
+    // rung3 off: no two-phase, so never armed-for-burst either.
+    const off = new PatternMatcher(STOP_PATTERN, { assist: 0 });
+    expect(feed(off, 45, HOLD).armedForBurst).toBe(false);
+  });
+
+  it("requiresBurst is true only for a rung3 stop scene", () => {
+    expect(new PatternMatcher(STOP_PATTERN, { rung3: true }).requiresBurst).toBe(true);
+    expect(new PatternMatcher(STOP_PATTERN, { rung3: false }).requiresBurst).toBe(false);
+    expect(new PatternMatcher(PATTERN, { rung3: true }).requiresBurst).toBe(false);
+  });
+
+  it("forceHoldSatisfied() latches the checkpoint so the next «т» wins (debug jump)", () => {
+    const m = new PatternMatcher(STOP_PATTERN, { assist: 0, rung3: true });
+    m.forceHoldSatisfied(); // no vowel drilled at all
+    const armed = m.update(makeFrame({ voiced: false, silenceMs: 16 }), DT);
+    expect(armed.holdSatisfied).toBe(true);
+    expect(armed.armedForBurst).toBe(true);
+    expect(m.update(makeFrame(BURST), DT).caught).toBe(true); // the next «т» wins
+  });
+});
+
+// --- #18: the armedBurst predicate is pure and correctly guarded -------------
+
+describe("armedBurst predicate (#18)", () => {
+  const f = (p: Partial<Parameters<typeof makeFrame>[0]>) => makeFrame(p);
+
+  it("a real stopBurst always fires — even before any silence elapsed", () => {
+    expect(armedBurst(f({ stopBurst: true }), false)).toBe(true);
+    expect(armedBurst(f({ stopBurst: true }), true)).toBe(true);
+  });
+
+  it("a fresh non-vowel-like onset AFTER a silence fires (pause-tolerant «т»)", () => {
+    expect(armedBurst(f({ onset: true, zcr: ZCR_HIGH + 0.1, vowelLikeness: 0.9 }), true)).toBe(true);
+    expect(armedBurst(f({ onset: true, vowelLikeness: 0, zcr: 0 }), true)).toBe(true); // low vowelLikeness alone
+  });
+
+  it("a VOWEL re-onset after a silence does NOT fire (the AC#4 guard)", () => {
+    // Onset + past silence, but tonal (low zcr, high vowelLikeness) → rejected.
+    const vowelish = f({ onset: true, vowelLikeness: ARMED_BURST_VOWEL_FLOOR + 0.1, zcr: 0.02 });
+    expect(armedBurst(vowelish, true)).toBe(false);
+  });
+
+  it("no fire without a preceding silence, or without an onset", () => {
+    const t = { onset: true, zcr: ZCR_HIGH + 0.1, vowelLikeness: 0.9 };
+    expect(armedBurst(f(t), false)).toBe(false); // no silence since arm
+    expect(armedBurst(f({ ...t, onset: false }), true)).toBe(false); // not a fresh onset
   });
 });

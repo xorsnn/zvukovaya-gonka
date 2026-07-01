@@ -13,6 +13,16 @@ letter. There is **no fail state** and no scold — a child always recovers by
 making the right sounds; difficulty lives only on the **строго ↔ легче** assist
 slider. Any change that would gate on word identity is out of scope by design.
 
+**The two-phase «Т» win (issue #18, default on).** On a `release.want === "stop"`
+scene the vowel hold ARMS a checkpoint (the actor parks, `strictnessFor` → forward-
+only) and from there **only a real «Т» finishes** — the run-out-of-breath *pause no
+longer wins* (producing the stop is the therapeutic point). "No fail state" is
+preserved by the slider, NOT by a pause-win: toward легче the required «Т» gets
+looser (`burstOptsForAssist`) so a struggling child always has a gentler stop to
+reach for. The pause-tolerant armed «Т» (`armedBurst`) must stay **guarded** against
+a vowel *re-onset* (non-vowel-like only), and non-stop words (дом → «М») keep the
+generous gap-catch untouched. Do not re-introduce a pause-win on a stop scene.
+
 ## Scenes and modes — the two axes of content (issue #16)
 
 A `WordScene` (`src/game/types.ts`) is one unit of content. Two things can vary,
@@ -25,9 +35,11 @@ and they cost differently — know which you're doing before you start:
 - **A new MODE (a new `SceneType`) needs CODE.** A mode is a different *picture*,
   so it needs a matching **render branch in `GameView.draw()`** (keyed on
   `scene.type`) plus a **picker entry**. The acoustic stack — `AcousticPattern`,
-  `PatternMatcher`, `stepPlay` physics, the assist/strictness tug-of-war, and the
+  `PatternMatcher`, `stepPlay` physics, the assist/strictness dial (`strictnessFor`:
+  forward-only two-phase for a stop scene, the #12 tug-of-war otherwise), and the
   particle/meadow/`drawChar` helpers — is **reused verbatim across modes**; only
-  the drawing branches. Modes built: `"chase"` (кот) and `"pull"` (вот).
+  the drawing branches. Modes built: `"chase"` (кот) and `"pull"` (вот); both are
+  stop scenes, so both share the two-phase «Т» win identically.
 
 When adding a mode:
 
@@ -62,10 +74,15 @@ not in the `WordScene` content model.
   `PatternMatcher.ts`, `stepPlay`/`carrotDepth` exported from `GameView.ts`,
   matcher wiring in `round.ts`. Do NOT reach for the DOM/canvas in a test.
 - Guardrails that MUST stay green: **AC#1/AC#5 identities** — the easy end
-  (`strictness = 0`) and the kill-switch (`match = null`, all rungs off) reproduce
-  the pre-#1 loudness path *byte-for-byte*; a new mode must not perturb them.
-- New rungs/modes ship **behind a flag or additively**, default-off / default-safe,
-  so behavior with the feature off is unchanged.
+  (`stepPlay` at `strictness = 0`) and the kill-switch (`match = null`, all rungs
+  off) reproduce the pre-#1 loudness path *byte-for-byte*; #18's two-phase change
+  lives in the matcher's catch + `strictnessFor`, NOT in `stepPlay`'s math, so these
+  stay untouched. The **stop-scene pause-never-wins** invariant (#18) is now itself a
+  guardrail (`PatternMatcher`/integration): a satisfied hold + only silence must
+  never catch on a `"stop"` scene.
+- New rungs/modes ship **behind a flag or additively**. Note the exception #18 set:
+  a rung's DEFAULT can flip on (`rung3: true`) once the behavior is the intended one
+  — but the all-rungs-off kill-switch must still be a byte-for-byte rollback.
 
 ## Working cadence (hard rules for this repo)
 

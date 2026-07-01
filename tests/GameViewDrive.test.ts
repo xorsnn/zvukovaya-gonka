@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { stepPlay, MOUSE_FLEE_RATE } from "../src/game/GameView";
+import { stepPlay, strictnessFor, MOUSE_FLEE_RATE } from "../src/game/GameView";
 import { PatternMatcher } from "../src/game/PatternMatcher";
+import { WORDS } from "../src/game/words";
 import type { AcousticPattern } from "../src/game/types";
 import type { MatchState } from "../src/game/PatternMatcher";
 import { makeFrame } from "./_helpers";
@@ -114,6 +115,7 @@ describe("tug-of-war drive (#12)", () => {
     vowelMatch: 1,
     consonantClass: "none",
     burstDetected: false,
+    armedForBurst: false,
     ...p,
   });
 
@@ -187,3 +189,50 @@ describe("tug-of-war drive (#12)", () => {
     expect(mid).toBeLessThan(easy); // a real, partial tug-of-war in between
   });
 });
+
+// --- #18: forward-only approach on a stop scene (strictnessFor) --------------
+
+describe("strictnessFor (#18)", () => {
+  const kot = WORDS.find((w) => w.id === "kot")!; // chase + «т» stop
+  const vot = WORDS.find((w) => w.id === "vot")!; // pull + «т» stop
+  const dom = WORDS.find((w) => w.id === "dom")!; // chase, non-stop («М»)
+
+  it("AC#6: a stop scene is forward-only (strictness 0) at EVERY assist", () => {
+    for (const assist of [0, 0.25, 0.5, 0.75, 1]) {
+      expect(strictnessFor(kot, assist)).toBe(0);
+      expect(strictnessFor(vot, assist)).toBe(0); // the pull mode too
+    }
+  });
+
+  it("a non-stop scene keeps the #12 tug-of-war (strictness = 1 - assist)", () => {
+    expect(strictnessFor(dom, 0)).toBe(1);
+    expect(strictnessFor(dom, 0.5)).toBe(0.5);
+    expect(strictnessFor(dom, 1)).toBe(0);
+  });
+
+  it("forward-only means the actor never drifts backward: stepPlay with strictness 0 is monotonic", () => {
+    // strictnessFor(kot, …) = 0, so stepPlay runs its easy trajectory — silence is
+    // a no-op, never a regression (the actor parks at the checkpoint).
+    const s = strictnessFor(kot, 0);
+    let p = 0.5;
+    for (let i = 0; i < 40; i++) {
+      const next = stepPlay(p, makeFrame({ voiced: false }), 0.016, mkMin(), true, s).progress;
+      expect(next).toBeGreaterThanOrEqual(p);
+      p = next;
+    }
+  });
+});
+
+/** A minimal MatchState (armed, silent) for the forward-only monotonicity check. */
+function mkMin(): MatchState {
+  return {
+    driveQuality: 0,
+    holdSatisfied: true,
+    caught: false,
+    sustainHeldMs: 600,
+    vowelMatch: 1,
+    consonantClass: "none",
+    burstDetected: false,
+    armedForBurst: true,
+  };
+}

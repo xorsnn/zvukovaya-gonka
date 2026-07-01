@@ -10,12 +10,18 @@
  *   - `holdSatisfied` — has the child sustained a vowel-like sound long enough
  *     that the pounce may arm? This is what defeats the "single short shout".
  *   - `caught` — the catch event: fires after a real hold *and* a genuine stop.
- *     The stop is a near-silence gap (`silenceMs >= effGapMs`) — the generous
- *     "just stop / run out of breath" finale — OR, on a Rung-3 "stop" scene, the
- *     real fast «т» stop-burst (`frame.stopBurst`, #12). Which one is required is
- *     ASSIST-SCALED (#12): toward the easy end the breath-stop gap still wins;
- *     toward the strict end it is withdrawn and only a real «т» burst catches.
- *     Either way the "continuous scream" (no gap, no burst) never catches.
+ *     TWO-PHASE «т» win (#18): on a Rung-3 "stop" scene (кот/вот/кит) the vowel
+ *     hold ARMS a checkpoint and from there ONLY a real «т» finishes — the
+ *     run-out-of-breath *pause never wins* (that is the therapeutic point: the
+ *     child must produce the «т»). The «т» is the engine's fast `frame.stopBurst`
+ *     OR, once armed, a pause-tolerant re-onset (see {@link armedBurst}), so a
+ *     child may pause arbitrarily long before it. Everywhere ELSE — a non-stop
+ *     word (дом → «М»), or rung3 off — the generous near-silence GAP
+ *     (`silenceMs >= effGapMs`) still finalizes the catch, exactly as before.
+ *     The строго↔легче slider is the single dial over both phases: toward легче a
+ *     shorter vowel arms AND the «т» detector loosens (`burstOptsForAssist`), so a
+ *     gentler «т» is the escape hatch that replaces the retired pause-win. Either
+ *     way the "continuous scream" (no closure, no burst) never catches.
  *
  * LENIENCY BY DESIGN — two thresholds, not one:
  *   - a *lenient* `holdThreshold` decides whether a sound "counts as trying"
@@ -38,6 +44,7 @@ import type { AudioFrame } from "../audio/AudioEngine";
 import {
   vowelMatch,
   classifyConsonant,
+  ZCR_HIGH,
   type VowelBaseline,
   type ConsonantClass,
   type ReleaseFrame,
@@ -58,15 +65,41 @@ export const MIN_HOLD_THRESHOLD = 0.4;
 export const RUNG3_WINDOW_FRAMES = 32;
 
 /**
- * Rung 3 (#12): the assist value at/below which a "stop" scene REQUIRES the real
- * «т» burst to catch — the breath-stop (run-out-of-breath) gap no longer finishes
- * it. Above this, the gap still wins (today's lenient finale, the default-safe
- * behavior). The escape hatch is the slider itself: a child not yet ready to
- * drill the «т» plays at a higher assist and still finishes by simply stopping.
- * Set so the default (0.5) stays lenient and only the deliberately-strict end
- * demands the «т». Placeholder pending real-mic tuning (#12, AC#6).
+ * Rung 3 (#18): once the checkpoint is armed, a fresh re-onset only counts as the
+ * «т» if it is clearly NON-vowel-like — a burst/transient, not the child simply
+ * re-starting the held vowel after a pause. A frame is "non-vowel-like" when its
+ * `vowelLikeness` is below this floor (OR its ZCR is above {@link ZCR_HIGH}). This
+ * is the guard that keeps AC#4 (re-starting the vowel must NOT win) true.
+ * Placeholder pending real-mic tuning with the child (#11/#12 tail).
  */
-export const BURST_REQUIRED_ASSIST = 0.3;
+export const ARMED_BURST_VOWEL_FLOOR = 0.35;
+
+/**
+ * armedBurst — the pause-tolerant armed «т» predicate (#18). Once the vowel hold
+ * has armed the checkpoint, a «т» finishes the round when EITHER the engine's
+ * fast `stopBurst` fires (the normal кот/вот case, the vowel still in the
+ * fast-env window) OR — because the child may pause arbitrarily long before the
+ * «т», by which point the arming vowel is long gone from that ~0.3 s window — a
+ * fresh non-vowel-like transient re-onset after a silence. The re-onset is
+ * GUARDED (`vowelLikeness < ARMED_BURST_VOWEL_FLOOR` or `zcr >= ZCR_HIGH`) so
+ * merely re-starting the VOWEL after a pause does NOT fire (AC#4). `stopBurst`
+ * short-circuits, so the normal path is unaffected by the pause bookkeeping.
+ *
+ * Pure: feed it a canned frame + the armed-silence flag in a test (no engine, no
+ * canvas). The evidence that a hold ever happened lives with the caller (the
+ * matcher only calls this once `holdSatisfied`).
+ */
+export function armedBurst(
+  frame: Pick<AudioFrame, "stopBurst" | "onset" | "vowelLikeness" | "zcr">,
+  sawSilenceSinceArm: boolean,
+): boolean {
+  if (frame.stopBurst) return true;
+  return (
+    sawSilenceSinceArm &&
+    frame.onset &&
+    (frame.vowelLikeness < ARMED_BURST_VOWEL_FLOOR || frame.zcr >= ZCR_HIGH)
+  );
+}
 
 /**
  * Rung 2 (#5) leniency bound, EASY end. At the easy end a "wrong" vowel still
@@ -103,11 +136,15 @@ export interface MatchState {
   /** Rung 3 (#6): coarse class of the recent release window ("none" when rung3
    * off / too little signal). For the debug overlay + tests. */
   consonantClass: ConsonantClass;
-  /** Rung 3 (#12): true on the frame the real fast «т» stop-burst
-   * (`frame.stopBurst`) fires the catch on a "stop" scene. Toward the strict end
-   * this is the ONLY catch path (the breath-stop gap is withdrawn); toward easy it
-   * is an early bonus on top of the gap. For the debug overlay + tests. */
+  /** Rung 3 (#18): true on the frame the «т» (fast stop-burst OR the pause-
+   * tolerant armed re-onset, see {@link armedBurst}) fires the catch on a "stop"
+   * scene — now the ONLY catch path there. For the debug overlay + tests. */
   burstDetected: boolean;
+  /** Rung 3 (#18): true while parked at the two-phase checkpoint — a satisfied
+   * hold on a Rung-3 "stop" scene — waiting for the «т». Drives the "now say Т"
+   * cue (GameView + host chip) and the debug overlay; false on every other path
+   * (non-stop word, rung3 off, loudness path). */
+  armedForBurst: boolean;
 }
 
 function clamp01(x: number): number {
@@ -165,6 +202,11 @@ export class PatternMatcher {
   private holdSatisfied = false;
   private done = false;
 
+  /** Rung 3 (#18): has a silence elapsed since the checkpoint armed? Set once the
+   * hold is satisfied and a silent frame is seen; enables the pause-tolerant armed
+   * «т» ({@link armedBurst}) so an arbitrarily long pause before the «т» is fine. */
+  private sawSilenceSinceArm = false;
+
   /** Rung 3 (#6) rolling release window (voiced + zcr per frame), kept only to
    * LABEL the consonant class for the debug overlay; only filled when rung3 is on,
    * so the default config allocates nothing here. The «т» catch itself no longer
@@ -200,11 +242,31 @@ export class PatternMatcher {
     this.dropoutMs = 0;
     this.holdSatisfied = false;
     this.done = false;
+    this.sawSilenceSinceArm = false;
     this.recent.length = 0;
   }
 
   setAssist(assist: number): void {
     this.assist = clamp01(assist);
+  }
+
+  /**
+   * Does this round require a real «т» to finish (the two-phase win, #18)? True
+   * only for a Rung-3 "stop" scene — where the pause no longer wins. The host
+   * (GameView / debug overlay) reads it to know when to show the checkpoint cue.
+   */
+  get requiresBurst(): boolean {
+    return this.rung3 && this.pattern.release.want === "stop";
+  }
+
+  /**
+   * Debug/tuning latch (#18): force the checkpoint armed (hold satisfied) so the
+   * NEXT «т» wins, without re-doing the vowel each attempt. Lets the armed «т» be
+   * tuned against real pauses. Bound to the `k` key behind the debug flag only.
+   */
+  forceHoldSatisfied(): void {
+    this.sustainHeldMs = Math.max(this.sustainHeldMs, this.effMinMs);
+    this.holdSatisfied = true;
   }
 
   // ---- assist-scaled effective thresholds (the leniency continuum) ----
@@ -291,22 +353,31 @@ export class PatternMatcher {
       consonantClass = classifyConsonant(this.recent);
     }
 
-    // --- catch: a real hold, then a genuine stop (#12, consonant-gated) ---
-    // Two stop evidences, the bar between them scaled by the one `assist` knob:
-    //   • the «т» BURST — the engine's fast `frame.stopBurst` (a real closure→burst
-    //     of 50–150 ms, #12), only on a Rung-3 "stop" scene. Always sufficient.
-    //   • the breath-stop GAP — `frame.silenceMs >= effGapMs`, the generous "ran
-    //     out of breath" finale. A continuous scream never produces a gap → no
-    //     catch, exactly as before.
-    // On a "stop" scene the gap is WITHDRAWN toward the strict end
-    // (assist <= BURST_REQUIRED_ASSIST) so only a real «т» burst wins there (AC#3);
-    // above it (default/easy) the gap still wins (leniency preserved). On a non-«т»
-    // scene (or rung3 off) the gap ALWAYS wins — we never demand a burst a word
-    // lacks, so «дом»/Rung-1 behavior is untouched.
-    const rung3Stop = this.rung3 && this.pattern.release.want === "stop";
-    const burstDetected = rung3Stop && frame.stopBurst;
-    const breathStopWins = !rung3Stop || this.assist > BURST_REQUIRED_ASSIST;
-    const gapCatch = breathStopWins && frame.silenceMs >= this.effGapMs;
+    // --- catch: a real hold, then the two-phase «т» finish (#18) --------------
+    // On a Rung-3 "stop" scene the run-out-of-breath GAP is DROPPED entirely: the
+    // vowel arms a checkpoint (`holdSatisfied`) and from there ONLY a real «т» wins
+    // — the pause never finishes (the therapeutic point). The «т» is the engine's
+    // fast `frame.stopBurst` OR, once a silence has elapsed since the arm, a
+    // pause-tolerant non-vowel-like re-onset ({@link armedBurst}) — so the child
+    // may pause arbitrarily long before it, and re-starting the VOWEL never
+    // false-fires (AC#4). Everywhere else — a non-stop word (дом), or rung3 off —
+    // the generous near-silence GAP (`silenceMs >= effGapMs`) still finalizes the
+    // catch, exactly as before: we never demand a burst a word lacks, so
+    // «дом»/Rung-1 behavior is untouched. A continuous scream (no closure/burst,
+    // no gap) never catches on either path.
+    const rung3Stop = this.requiresBurst;
+
+    // Pause bookkeeping for the armed «т»: once armed, remember a silence passed.
+    if (this.holdSatisfied && frame.silenceMs > 0) this.sawSilenceSinceArm = true;
+
+    let burstDetected = false;
+    let gapCatch = false;
+    if (rung3Stop) {
+      burstDetected = this.holdSatisfied && armedBurst(frame, this.sawSilenceSinceArm);
+    } else {
+      gapCatch = frame.silenceMs >= this.effGapMs;
+    }
+
     let caught = false;
     if (this.holdSatisfied && !this.done && (gapCatch || burstDetected)) {
       caught = true;
@@ -321,6 +392,7 @@ export class PatternMatcher {
       vowelMatch: vmatch,
       consonantClass,
       burstDetected,
+      armedForBurst: rung3Stop && this.holdSatisfied,
     };
   }
 }

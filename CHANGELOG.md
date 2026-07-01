@@ -4,6 +4,69 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.9.0] - 2026-07-01
+
+The **two-phase «Т» win** (issue #18), the intended core experience, now shipped
+**on by default** and identical across both modes (🐱 Догонялки / кот and
+🐰 Морковка / вот). The child sustains the vowel → the actor advances to an
+"almost there" checkpoint and **freezes** → a pause there is neutral → **only a
+real «Т» finishes it**. The pause no longer wins — producing the final stop is the
+therapeutic point, and now the game requires it. The строго↔легче slider is one
+dial over both phases: toward легче a shorter vowel arms **and** a gentler «Т» is
+accepted; toward строго a longer/cleaner vowel **and** a crisper «Т». That looser
+«Т» is the new escape hatch that replaces the retired pause-win, so a struggling
+child always has a gentler path — there is still no fail state.
+
+### Changed
+- `src/game/config.ts` — `DEFAULT_CONFIG.rung3` now **`true`** (was `false`): the
+  «Т» detector, and with it the two-phase win, ships on. The all-rungs-off
+  kill-switch (`anyRungOn === false` → `match === null`) stays **byte-for-byte** the
+  pre-#1 loudness engine, so the rollback is unchanged. Flip `rung3` back to `false`
+  to return to the loudness/gap-catch default (the mechanic goes inert).
+- `src/game/PatternMatcher.ts` — on a Rung-3 `"stop"` scene the run-out-of-breath
+  **gap catch is dropped entirely** (a pause never completes the round); the catch
+  is now `holdSatisfied && armedBurst`. `BURST_REQUIRED_ASSIST` (the #12 assist
+  threshold that withdrew the gap) is **retired**. Non-stop words (дом → «М») and
+  the rung3-off path keep the breath-stop gap **unchanged**.
+- `src/game/GameView.ts` — a `"stop"` scene's approach is now **forward-only** (new
+  pure exported `strictnessFor(scene, assist)` returns `0` there, else `1 - assist`):
+  the actor advances and parks at the checkpoint instead of the #12 mouse-flee, so
+  it never drifts backward. `stepPlay`'s math is unchanged (AC#5 intact — it just
+  receives a strictness of `0`).
+- `src/audio/AudioEngine.ts` — `setAssist(assist)` feeds `burstOptsForAssist` into
+  `detectStopBurst`, so the «Т» detector's sensitivity tracks the строго↔легче
+  slider (cached per change, no per-frame allocation).
+
+### Added
+- `src/game/PatternMatcher.ts` — the **pause-tolerant armed «Т»**: once armed, a
+  `sawSilenceSinceArm` flag lets a fresh transient after an arbitrarily long pause
+  finish the round (the arming vowel is gone from the engine's fast-env window by
+  then). Exported pure `armedBurst(frame, sawSilenceSinceArm)` predicate, **guarded**
+  so a vowel **re-onset** never false-fires (must be non-vowel-like: high ZCR or low
+  `vowelLikeness`). New `MatchState.armedForBurst`, a `requiresBurst` getter, and a
+  `forceHoldSatisfied()` debug latch.
+- `src/audio/PhoneticFeatures.ts` — pure exported `burstOptsForAssist(assist)`,
+  monotonic toward легче on every knob (`loudRatio`↓, `dipFraction`↑, `riseFraction`↓,
+  `minClosureMs`↓, `maxClosureMs`↑) — the genuine easier «Т» path.
+- `src/game/GameView.ts` — a shared **"now say Т" checkpoint cue** (a gentle pulsing
+  badge over the goal) shown only while parked waiting for the «Т», plus a
+  `debugArmCheckpoint()` jump and an `armedForBurst` getter for the host.
+- `src/main.ts` — `audio.setAssist` wired on init + slider input; a **`k` debug jump**
+  (game screen + debug only) that latches the checkpoint so the next «Т» wins; an
+  `⚑ARMED waiting-«Т»` line in the `?debug` overlay; and a stronger **checkpoint cue**
+  on the «Т» chip (`.burst.checkpoint`).
+- Tests: pause-never-wins (strict / default / easy), armed «Т» after ≥3 s silence,
+  no false-fire on a vowel re-onset, «Т»-before-arm no-op, the `armedBurst` predicate,
+  `burstOptsForAssist` monotonicity, and `strictnessFor` forward-only — 130 → 149.
+  The AC#5 kill-switch identity, the дом gap-catch, and the #12 `stepPlay` math stay
+  green untouched.
+
+### Notes
+- The «Т» thresholds and the assist→bounds mapping are **placeholders**, to be tuned
+  on a real microphone **with the child** (folds into #11) — the unit tests only fix
+  their shape (monotonicity, the guards), not the final feel. Use the `k` jump under
+  `?debug` to drill the armed «Т» against real pauses without re-doing the vowel.
+
 ## [0.8.0] - 2026-07-01
 
 Second play **mode** + the first scene **picker** (issue #16). The game is now

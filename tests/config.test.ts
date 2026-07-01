@@ -107,6 +107,15 @@ describe("config store (loadConfig / saveConfig)", () => {
     s2.map.set(STORAGE_KEY, JSON.stringify({ showLetter: true }));
     expect(loadConfig(s2)).toEqual({ ...DEFAULT_CONFIG, showLetter: true }); // merges with defaults
   });
+
+  it("#18: rung3 defaults ON (the two-phase «т» win is the shipped default)", () => {
+    expect(DEFAULT_CONFIG.rung3).toBe(true);
+    expect(loadConfig(new MemoryStorage()).rung3).toBe(true);
+    // A caregiver can still turn it OFF, and that choice round-trips (the rollback).
+    const s = new MemoryStorage();
+    saveConfig({ ...DEFAULT_CONFIG, rung3: false }, s);
+    expect(loadConfig(s).rung3).toBe(false);
+  });
 });
 
 describe("anyRungOn", () => {

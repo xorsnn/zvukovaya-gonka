@@ -1,7 +1,7 @@
 {
   "name": "zvukovaya-gonka",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "description": "Гонка звуков — голосовая игра для запуска речи у детей с задержкой речевого развития",
   "scripts": {
