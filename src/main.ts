@@ -3,6 +3,7 @@ import { AudioEngine, type AudioFrame } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
 import { GameView, MIN_FLOOR, MOUSE_FLEE_RATE } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
+import { LetterIndicator } from "./game/LetterIndicator";
 import { DEFAULT_WORD } from "./game/words";
 import { speakWord } from "./game/sfx";
 import { loadConfig, saveConfig, anyRungOn } from "./game/config";
@@ -13,6 +14,8 @@ const app = document.getElementById("app")!;
 const audio = new AudioEngine();
 const meter = new MeterView();
 const game = new GameView(DEFAULT_WORD);
+// Read-only live-vowel chip smoother (#13); only consulted when config.showLetter.
+const letterIndicator = new LetterIndicator();
 
 // ---------- build the DOM ----------
 
@@ -67,6 +70,7 @@ app.innerHTML = `
           <input type="range" id="assistSlider" min="0" max="1" step="0.1" value="0.5" aria-label="Строгость распознавания" />
           <span class="assist-cap">легче</span>
         </label>
+        <label><input type="checkbox" id="letterToggle" /> <span>показывать букву</span></label>
         <div class="settings-row">
           <label><input type="checkbox" id="debugToggle" /> <span>отладка</span></label>
           <button class="parent-link" id="recalBtn">🎤 микрофон</button>
@@ -95,6 +99,7 @@ const rung1Toggle = el<HTMLInputElement>("#rung1Toggle");
 const rung2Toggle = el<HTMLInputElement>("#rung2Toggle");
 const rung3Toggle = el<HTMLInputElement>("#rung3Toggle");
 const debugToggle = el<HTMLInputElement>("#debugToggle");
+const letterToggle = el<HTMLInputElement>("#letterToggle");
 const checkHint = el<HTMLElement>("#checkHint");
 const celebrate = el<HTMLElement>("#celebrate");
 const sustainEl = el<HTMLElement>("#sustainEl");
@@ -115,10 +120,22 @@ hintEl.textContent = game.getScene().hint;
 // settings survive a reload. With no rung enabled the game runs exactly as the
 // shipped loudness-only build (the generalization of the old USE_PHONETIC).
 const config = loadConfig();
-// Tell the engine whether to run the spectral layer at all, and whether to spend
-// the extra per-frame formant pass (only when Rung 2 actually grades a scene).
-audio.setPhoneticEnabled(anyRungOn(config));
-audio.setRung2Enabled(config.rung2);
+
+/**
+ * Push the current config's needs onto the engine's two spectral flags.
+ *
+ * The formant pass feeds two independent consumers now: Rung 2's vowel-identity
+ * grading AND the read-only live-vowel chip (#13). So the flags are widened by
+ * `showLetter` — with the chip on, the engine runs the spectral + formant passes
+ * even when every rung is off, which is exactly what lets the chip work standalone
+ * (AC#5). With the chip off and the default config, this is byte-identical to the
+ * old two lines.
+ */
+function applyEngineFlags(): void {
+  audio.setPhoneticEnabled(anyRungOn(config) || config.showLetter);
+  audio.setRung2Enabled(config.rung2 || config.showLetter);
+}
+applyEngineFlags();
 
 /** Hold threshold for vowel-likeness; tightened/relaxed by mic-check calibration. */
 let calibHoldThreshold = MIN_HOLD_THRESHOLD;
@@ -151,7 +168,10 @@ function mean(xs: number[]): number {
  * generous adult defaults rather than guessing.
  */
 function finalizeCalibration(): void {
-  if (!anyRungOn(config)) return;
+  // The chip (#13) needs her formant baseline too, so calibrate whenever a rung
+  // OR the chip is on. With every rung off the matcher is null, so the baseline
+  // is unused by grading and only feeds the read-only chip.
+  if (!anyRungOn(config) && !config.showLetter) return;
   if (calibVowel.length >= 12) {
     // Carry her F1/F2 only if we gathered enough non-zero estimates; the
     // matcher treats a missing pair as "no opinion" (graded, never gated, #5).
@@ -201,6 +221,7 @@ rung2Toggle.checked = config.rung2;
 rung3Toggle.checked = config.rung3;
 assistSlider.value = String(config.assist);
 debugToggle.checked = config.debug;
+letterToggle.checked = config.showLetter;
 
 gearBtn.addEventListener("click", () => {
   const willOpen = settingsPanel.hasAttribute("hidden");
@@ -214,14 +235,24 @@ function onRungChange(): void {
   config.rung1 = rung1Toggle.checked;
   config.rung2 = rung2Toggle.checked;
   config.rung3 = rung3Toggle.checked;
-  audio.setPhoneticEnabled(anyRungOn(config));
-  audio.setRung2Enabled(config.rung2);
+  applyEngineFlags();
   buildMatcher();
   saveConfig(config);
 }
 rung1Toggle.addEventListener("change", onRungChange);
 rung2Toggle.addEventListener("change", onRungChange);
 rung3Toggle.addEventListener("change", onRungChange);
+
+// The chip is read-only: flipping it only widens the engine's formant pass and
+// shows/hides the chip. It never rebuilds the matcher, so grading is untouched
+// (issue #13's read-only invariant, AC#6).
+letterToggle.addEventListener("change", () => {
+  config.showLetter = letterToggle.checked;
+  applyEngineFlags();
+  letterIndicator.reset();
+  updateLetterChipVisibility();
+  saveConfig(config);
+});
 
 assistSlider.addEventListener("input", () => {
   config.assist = parseFloat(assistSlider.value);
@@ -252,6 +283,10 @@ function showScreen(name: Screen): void {
       startRound();
     });
   }
+  // Reflect the read-only chip: reset its smoother on any screen change and
+  // show it only on the listening screens (AC#7). It holds no game state.
+  letterIndicator.reset();
+  updateLetterChipVisibility();
 }
 
 // ---------- game round helpers ----------
@@ -381,6 +416,63 @@ function renderDebug(frame: AudioFrame): void {
     `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;
 }
 
+// ---------- live-vowel chip (issue #13) ----------
+// A read-only caregiver display: the most-likely vowel (А/О/У/И or «—») plus a
+// thin confidence bar. Deliberately adult, not a reward — no bounce, no
+// color-pop. Created lazily (like the debug overlay) so it costs nothing when
+// off, shown ONLY on the check + game screens (AC#7), behind the default-off
+// «показывать букву» toggle. It NEVER touches the matcher — read-only (AC#6).
+let letterChipEl: HTMLElement | null = null;
+let letterGlyphEl: HTMLElement | null = null;
+let letterBarEl: HTMLElement | null = null;
+
+function ensureLetterChip(): void {
+  if (letterChipEl) return;
+  letterChipEl = document.createElement("div");
+  letterChipEl.id = "letterChip";
+  letterChipEl.className = "letter-chip";
+  letterGlyphEl = document.createElement("span");
+  letterGlyphEl.className = "letter";
+  letterGlyphEl.textContent = "—";
+  const bar = document.createElement("div");
+  bar.className = "conf-bar";
+  letterBarEl = document.createElement("i");
+  bar.appendChild(letterBarEl);
+  letterChipEl.append(letterGlyphEl, bar);
+  document.body.appendChild(letterChipEl);
+}
+
+/** Should the chip be visible right now? On, and on a listening screen (AC#7). */
+function letterChipActive(): boolean {
+  return config.showLetter && (current === "check" || current === "game");
+}
+
+function updateLetterChipVisibility(): void {
+  if (letterChipActive()) {
+    ensureLetterChip();
+    letterChipEl!.style.display = "flex";
+  } else if (letterChipEl) {
+    letterChipEl.style.display = "none";
+  }
+}
+
+/** Feed one frame through the smoother and paint the glyph + confidence bar. */
+function renderLetterChip(frame: AudioFrame, dtMs: number): void {
+  ensureLetterChip();
+  const cls = letterIndicator.update(
+    { f1: frame.f1, f2: frame.f2 },
+    frame.level,
+    frame.voiced,
+    audio.getVowelBaseline(),
+    dtMs,
+  );
+  // Lowercase union → uppercase glyph is display-only (а→А, о→О, у→У, и→И).
+  letterGlyphEl!.textContent = cls.vowel ? cls.vowel.toUpperCase() : "—";
+  // «—» always shows an empty bar; a real letter shows its smoothed confidence.
+  const conf = cls.vowel ? Math.max(0, Math.min(1, cls.confidence)) : 0;
+  letterBarEl!.style.width = `${Math.round(conf * 100)}%`;
+}
+
 // ---------- master loop ----------
 let last = performance.now();
 function loop(now: number): void {
@@ -416,6 +508,7 @@ function loop(now: number): void {
   }
 
   if (dbgVisible && (current === "check" || current === "game")) renderDebug(frame);
+  if (letterChipActive()) renderLetterChip(frame, dt);
 
   requestAnimationFrame(loop);
 }

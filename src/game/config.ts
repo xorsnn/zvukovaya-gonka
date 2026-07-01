@@ -33,6 +33,11 @@ export interface PhoneticConfig {
   assist: number;
   /** Show the hidden phonetic-feature overlay (also forced on by `?debug`). */
   debug: boolean;
+  /** Show the read-only live-vowel chip (#13): the argmax vowel + confidence.
+   * Off by default; a caregiver/dev display that never changes how the chase
+   * grades. When on it also widens the engine's formant pass so the chip works
+   * even with every rung off (see `main.ts`). */
+  showLetter: boolean;
 }
 
 export const DEFAULT_CONFIG: PhoneticConfig = {
@@ -41,6 +46,7 @@ export const DEFAULT_CONFIG: PhoneticConfig = {
   rung3: false,
   assist: 0.5,
   debug: false,
+  showLetter: false,
 };
 
 /** localStorage key. Versioned so a future schema change can migrate cleanly. */
@@ -95,6 +101,7 @@ function coerce(raw: unknown): PhoneticConfig {
     rung3: bool(o.rung3, DEFAULT_CONFIG.rung3),
     assist: unit(o.assist, DEFAULT_CONFIG.assist),
     debug: bool(o.debug, DEFAULT_CONFIG.debug),
+    showLetter: bool(o.showLetter, DEFAULT_CONFIG.showLetter),
   };
 }
 

@@ -402,3 +402,42 @@ body {
 .settings-panel .assist-control {
   justify-content: center;
 }
+
+/* live-vowel chip (issue #13): a read-only caregiver readout of the most-likely
+   vowel + a thin confidence bar. Deliberately ADULT, not a reward — a neutral
+   gray glyph on a translucent dark pill, no animation / bounce / color-pop, so
+   it never competes with the chase for the child's attention. Shown only when
+   «показывать букву» is on (main.ts toggles display). */
+.letter-chip {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 10px;
+  pointer-events: none;
+}
+.letter-chip .letter {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.82);
+}
+.letter-chip .conf-bar {
+  width: 34px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+.letter-chip .conf-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: rgba(255, 255, 255, 0.6);
+}
