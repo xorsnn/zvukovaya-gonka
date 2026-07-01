@@ -142,13 +142,32 @@ export function stepPlay(
 }
 
 /**
- * GameView renders one chase scene to a canvas and drives it entirely from the
- * audio loudness envelope.
+ * Pull mode (#16): how far the carrot has risen out of the soil, as a pure,
+ * strictly-monotonic function of chase `progress` — 0 = buried (only the leaves
+ * peek), 1 = free. Chase progress and carrot emergence are the SAME physics
+ * (`stepPlay`), drawn differently; this only maps one to the other. The ease-out
+ * `p·(2−p)` lurches the carrot up early then slows as it clears the ground, and
+ * is strictly increasing on `[0, 1)` so more progress always shows more carrot
+ * (unit-tested for monotonicity). Exported (like `stepPlay`) so it is testable
+ * without a canvas.
+ */
+export function carrotDepth(progress: number): number {
+  const p = progress < 0 ? 0 : progress > 1 ? 1 : progress;
+  return p * (2 - p);
+}
+
+/**
+ * GameView renders one scene to a canvas — a chase (кот) or a pull (вот, #16) —
+ * and drives it entirely from the audio loudness/phonetic envelope.
  *
- * The loop:
- *   1. play     — child voices → cat chases mouse (gap closes with sustain).
- *   2. pounce   — once close, a burst ("Т") OR simply stopping triggers a leap.
- *   3. celebrate— cat & mouse become friends: hearts, confetti, happy sound.
+ * The state machine, physics (`stepPlay`), particles, and the meadow/`drawChar`
+ * helpers are shared across modes; only the `draw()` branch differs (`scene.type`):
+ *   1. play     — child voices → the actor advances (cat closes on the mouse /
+ *                 the rabbit raises the carrot) as the vowel sustains.
+ *   2. pounce   — once armed, a burst ("Т") OR simply stopping triggers the beat:
+ *                 the cat leaps / the carrot pops free.
+ *   3. celebrate— the happy ending: cat & mouse become friends / the rabbit hugs
+ *                 the freed carrot — hearts, confetti, happy sound.
  *
  * There is no fail state. Pauses don't lose progress. Any acoustic event near
  * the end finishes the catch. Leniency is the whole point.
@@ -381,6 +400,20 @@ export class GameView {
     ctx.clearRect(0, 0, w, h);
     this.drawMeadow(now);
 
+    // Shared shell → mode-specific actors (#16). The state machine, physics,
+    // particles, meadow, and drawChar helpers are common to every scene; only the
+    // picture branches on `scene.type`.
+    if (this.scene.type === "pull") this.drawPull(now);
+    else this.drawChase(now);
+
+    // celebration extras (shared across modes)
+    this.drawConfetti();
+    this.drawHearts();
+  }
+
+  /** Chase render path (кот): the cat closes on the mouse, leaps, then befriends it. */
+  private drawChase(now: number): void {
+    const { w, h } = this;
     const p = this.displayProgress;
     const charSize = Math.min(h * 0.2, w * 0.16);
 
@@ -447,10 +480,117 @@ export class GameView {
         flip: false,
       });
     }
+  }
 
-    // celebration extras
-    this.drawConfetti();
-    this.drawHearts();
+  /**
+   * Pull render path (вот, #16): a rabbit hauls a carrot out of a soil mound.
+   * `carrotDepth(progress)` reads the SAME chase progress as how far the carrot
+   * has risen — the mound (drawn opaque, over the carrot) occludes the buried
+   * part, so a rising `progress` looks like the carrot emerging. The `pounce`
+   * beat becomes the POP (the carrot leaps free, the rabbit tumbles back) and
+   * `celebrate` is the rabbit hugging the freed carrot — reusing the shared
+   * confetti/hearts verbatim.
+   */
+  private drawPull(now: number): void {
+    const { w, h } = this;
+    const size = Math.min(h * 0.2, w * 0.16);
+    const cx = w * 0.56; // where the carrot is planted
+    const soilY = this.groundY; // the surface it emerges through
+    const e = carrotDepth(this.displayProgress);
+
+    // carrot centre: buried (only the leaves peek above the low mound crest) →
+    // free (fully out). The travel is large so a rising `progress` visibly hauls
+    // the carrot clear of the soil rather than staying swallowed by the mound.
+    const buriedY = soilY + size * 0.22;
+    const freeY = soilY - size * 0.58;
+
+    let carrotY = buriedY + (freeY - buriedY) * e;
+    let carrotRot = 0;
+    let rabbitX = cx - size * 0.66;
+    let rabbitY = soilY;
+    // the rabbit leans back harder the further the carrot has risen (straining)
+    let rabbitLean = -0.14 - 0.28 * e;
+    let planted = true; // carrot still in the mound → occlude its buried part
+    let caught = false;
+
+    if (this.state === "pounce") {
+      // the POP: the carrot leaps free, the rabbit tumbles back
+      const t = Math.min(1, this.pounceElapsed / 480);
+      const ease = t * t * (3 - 2 * t);
+      carrotY = freeY - Math.sin(Math.PI * t) * h * 0.3; // arcs up and settles
+      carrotRot = ease * 0.7;
+      rabbitLean = -0.14 - ease * 0.9;
+      rabbitX = cx - size * 0.66 - ease * size * 0.55;
+      rabbitY = soilY + ease * size * 0.16;
+    } else if (this.state === "celebrate") {
+      caught = true;
+      const bob = Math.sin(now / 140) * h * 0.03;
+      const bob2 = Math.sin(now / 140 + 1) * h * 0.03;
+      carrotY = soilY - size * 0.3 + bob2; // held up, out of the ground
+      rabbitX = cx - size * 0.5;
+      rabbitY = soilY + bob;
+      rabbitLean = 0;
+      planted = false;
+    } else {
+      // straining wobble while the child sustains the vowel
+      carrotY += Math.sin(now / 70) * size * 0.02 * this.moving;
+      rabbitY += Math.sin(now / 80) * size * 0.04 * this.moving;
+    }
+
+    // the carrot first; the mound then paints over whatever is still buried
+    this.drawChar(this.scene.fleer, cx, carrotY, size, {
+      lean: carrotRot,
+      squash: 0,
+      flip: false,
+    });
+
+    // the dirt mound it's planted in — opaque, so its domed top IS the soil line
+    if (planted) this.drawSoilMound(cx, soilY, size);
+
+    // shadows for the above-ground actors (in front of the mound)
+    this.drawShadow(rabbitX, soilY, size * 0.9);
+    if (caught) this.drawShadow(cx, soilY, size * 0.7);
+
+    // effort crumbs kicking up while the child strains
+    if (this.moving > 0.1 && this.state === "play") {
+      this.drawDust(cx - size * 0.2, soilY, size, now, this.moving);
+    }
+
+    // the rabbit, gripping in front of the mound
+    this.drawChar(this.scene.chaser, rabbitX, rabbitY, size, {
+      lean: rabbitLean,
+      squash: 0,
+      flip: false,
+    });
+  }
+
+  /** The soil mound a pull-scene carrot is planted in (its domed top = the soil line). */
+  private drawSoilMound(cx: number, soilY: number, size: number): void {
+    const { ctx } = this;
+    const rx = size * 0.82;
+    // A LOW crest (so it occludes only the buried lower carrot, not the risen
+    // body) over a deep base (so a buried carrot's tip never pokes out beneath it).
+    const moundH = size * 0.05;
+    const base = soilY + size * 0.9;
+    const g = ctx.createLinearGradient(0, soilY - moundH, 0, base);
+    g.addColorStop(0, "#b07a45");
+    g.addColorStop(1, "#6f4423");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(cx - rx, base);
+    ctx.lineTo(cx - rx, soilY);
+    ctx.quadraticCurveTo(cx, soilY - moundH * 2, cx + rx, soilY);
+    ctx.lineTo(cx + rx, base);
+    ctx.closePath();
+    ctx.fill();
+    // a soft crumbly rim across the dome for texture
+    ctx.fillStyle = "rgba(60,38,18,0.28)";
+    ctx.beginPath();
+    ctx.moveTo(cx - rx, soilY);
+    ctx.quadraticCurveTo(cx, soilY - moundH * 2, cx + rx, soilY);
+    ctx.quadraticCurveTo(cx, soilY - moundH * 1.2, cx - rx, soilY);
+    ctx.closePath();
+    ctx.fill();
   }
 
   private drawMeadow(now: number): void {

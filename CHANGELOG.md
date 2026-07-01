@@ -4,6 +4,42 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.8.0] - 2026-07-01
+
+Second play **mode** + the first scene **picker** (issue #16). The game is now
+multi-mode: alongside the кот **chase**, a «Морковка» **pull** — a rabbit hauls a
+carrot out of the ground and it pops free on «…Т» (= «вот!», there it is). The
+start screen grows a two-card picker (🐱 Догонялки / 🐰 Морковка), default chase.
+The hard part is fully reused: **zero new acoustic tuning** — вот carries кот's
+exact `holdStop("о","stop","Т")`, and the pull shares the tug-of-war physics,
+matcher, strictness slider, and celebration particles. Only the *picture* is new.
+
+### Added
+- `src/game/types.ts` — `SceneType` widens to `"chase" | "pull"`. `chaser`/`fleer`
+  are documented as role-by-`type` (pursuer/fleer for a chase, puller/prize for a
+  pull), so the content model stays two-emoji-and-text for every mode.
+- `src/game/words.ts` — the `vot` **pull** scene (🐰 pulls 🥕), reusing
+  `holdStop("о","stop","Т")` verbatim; and `PICKABLE_SCENES` — the two modes the
+  start-screen picker surfaces, default (chase) first. дом/кит stay unsurfaced.
+- `src/game/GameView.ts` — a `scene.type`-keyed render branch: `drawChase`
+  (unchanged) and a new `drawPull` (soil mound, carrot-emergence geometry, rabbit
+  grip → the «т» POP → the rabbit hugging the freed carrot), plus `carrotDepth` —
+  a pure, strictly-monotonic emergence curve exported for unit testing. The state
+  machine, `stepPlay` physics, particles, meadow, and `drawChar` are shared.
+- `src/game/round.ts` — `buildSceneMatcher(scene, config, opts)`: the one pure
+  decision "a round's matcher is built from the ACTIVE scene's pattern", shared by
+  `main.ts` and the picker test (verifiable without a canvas).
+- `src/main.ts` / `src/style.css` — the start-screen scene picker (two selectable
+  cards); the chosen scene is set active before mic-check.
+- `tests/scenes.test.ts` — the pull scene is well-formed and reuses кот's pattern,
+  the picker rebuilds the matcher on the selected scene's pattern (and both modes
+  yield equivalent matchers), and `carrotDepth` is monotonic + bounded. 121 → 130.
+
+### Changed
+- The opening flow grows a **picker step** — the first time the game is
+  multi-mode. Choosing the default (chase) reproduces the pre-#16 flow; the
+  acoustic layer and all 121 prior tests are untouched.
+
 ## [0.7.0] - 2026-07-01
 
 Live vowel indicator (issue #13) — a **read-only** caregiver chip that shows
