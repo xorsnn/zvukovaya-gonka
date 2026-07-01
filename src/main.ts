@@ -4,7 +4,9 @@ import { MeterView } from "./game/MeterView";
 import { GameView, MIN_FLOOR, MOUSE_FLEE_RATE } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { LetterIndicator } from "./game/LetterIndicator";
-import { DEFAULT_WORD } from "./game/words";
+import { DEFAULT_WORD, PICKABLE_SCENES } from "./game/words";
+import { buildSceneMatcher } from "./game/round";
+import type { WordScene } from "./game/types";
 import { speakWord } from "./game/sfx";
 import { loadConfig, saveConfig, anyRungOn } from "./game/config";
 
@@ -22,8 +24,8 @@ const letterIndicator = new LetterIndicator();
 app.innerHTML = `
   <section class="screen start active" data-screen="start">
     <h1 class="big-title">Гонка<br/>звуков</h1>
-    <div class="emoji-row"><span class="chase">🐱</span><span class="flee">🐭</span></div>
-    <p class="subtitle">Скажи звук — и котик побежит! 🎤</p>
+    <div class="scene-picker" id="scenePicker" role="radiogroup" aria-label="Выбери игру"></div>
+    <p class="subtitle">Выбери игру и скажи звук! 🎤</p>
     <button class="btn btn-go" id="startBtn">Начать ▶</button>
   </section>
 
@@ -108,10 +110,50 @@ const hintEl = el<HTMLElement>("#hintEl");
 const deniedTitle = el<HTMLElement>("#deniedTitle");
 const deniedText = el<HTMLElement>("#deniedText");
 
-// fill in word content
-sustainEl.textContent = game.getScene().sustainPart;
-burstEl.textContent = game.getScene().burstPart;
-hintEl.textContent = game.getScene().hint;
+// ---------- scene picker (issue #16) ----------
+// Two play modes on the start screen: 🐱 Догонялки (chase, кот — the default) and
+// 🐰 Морковка (pull, вот). Both share the identical «т»/hold acoustic stack, so
+// picking one only sets the ACTIVE scene before mic-check; startRound() rebuilds
+// the matcher from game.getScene().pattern, so the rest of the flow is unchanged.
+const scenePicker = el<HTMLElement>("#scenePicker");
+// Mode names (a picker-only label, not part of the acoustic content model).
+const SCENE_LABELS: Record<string, string> = { kot: "Догонялки", vot: "Морковка" };
+
+/** Mirror the active scene's word into the game screen's prompt card. */
+function syncWordCard(): void {
+  const s = game.getScene();
+  sustainEl.textContent = s.sustainPart;
+  burstEl.textContent = s.burstPart;
+  hintEl.textContent = s.hint;
+}
+
+/** Make `scene` the active one and reflect the choice in the picker + prompt. */
+function selectScene(scene: WordScene): void {
+  if (game.getScene().id !== scene.id) game.setScene(scene);
+  for (const card of scenePicker.querySelectorAll<HTMLButtonElement>(".scene-card")) {
+    const on = card.dataset.sceneId === scene.id;
+    card.classList.toggle("selected", on);
+    card.setAttribute("aria-checked", String(on));
+  }
+  syncWordCard();
+}
+
+for (const scene of PICKABLE_SCENES) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "scene-card";
+  card.dataset.sceneId = scene.id;
+  card.setAttribute("role", "radio");
+  card.innerHTML =
+    `<span class="scene-emoji">${scene.chaser}${scene.fleer}</span>` +
+    `<span class="scene-name">${SCENE_LABELS[scene.id] ?? scene.word}</span>`;
+  card.addEventListener("click", () => selectScene(scene));
+  scenePicker.appendChild(card);
+}
+
+// Default = the game's initial scene (the first pickable = chase / кот), so
+// choosing nothing reproduces the pre-#16 flow byte-for-byte (AC#1).
+selectScene(game.getScene());
 
 // ---------- phonetic ladder config (issues #1, #4) ----------
 // `config` is the single source of truth for the whole phonetic layer: the
@@ -196,17 +238,8 @@ function finalizeCalibration(): void {
  * real-«т» stop's bonus burst-catch (#6) for a scene whose release wants a stop.
  */
 function buildMatcher(): void {
-  if (!anyRungOn(config)) {
-    matcher = null;
-    game.setMatcher(null);
-    return;
-  }
-  matcher = new PatternMatcher(game.getScene().pattern, {
-    assist: config.assist,
+  matcher = buildSceneMatcher(game.getScene(), config, {
     holdThreshold: calibHoldThreshold,
-    rung1: config.rung1,
-    rung2: config.rung2,
-    rung3: config.rung3,
     vowelBaseline: audio.getVowelBaseline(),
   });
   game.setMatcher(matcher);

@@ -31,10 +31,10 @@ function holdStop(
 }
 
 /**
- * Word bank. The MVP focuses on «кот», but the structure is ready for the
- * difficulty ladder described in the brief: each entry is a [hold] + [stop]
- * word that reskins the same chase mechanic. Onomatopoeia / non-chase scenes
- * would add a new SceneType later.
+ * Word bank. Each entry is a [hold] + [stop] word that reskins the same acoustic
+ * mechanic; `type` picks the *picture* (a chase or a pull, #16) — see
+ * {@link WordScene} and root CLAUDE.md. Adding a `[hold]+[stop]` word on an
+ * existing type is data-only; a new `type` also needs a GameView render branch.
  */
 export const WORDS: WordScene[] = [
   {
@@ -50,7 +50,24 @@ export const WORDS: WordScene[] = [
     theme: "meadow",
     pattern: holdStop("о", "stop", "Т"), // «кот» finishes on a real «т» stop (Rung 3)
   },
-  // --- ready for later (not surfaced in the MVP flow yet) ---
+  {
+    // «Морковка» (#16): the SAME acoustic word as кот — hold «во-о-о», pop on «…Т»
+    // (= "вот!", there it is) — rendered as a PULL instead of a chase. Reuses
+    // кот's exact holdStop("о","stop","Т"): zero new acoustic tuning. Here the two
+    // actor emoji read as puller/prize (rabbit/carrot), not pursuer/fleer.
+    id: "vot",
+    type: "pull",
+    word: "вот",
+    display: "ВО-О-О-Т",
+    sustainPart: "ВОоо",
+    burstPart: "Т",
+    hint: "Тяни «во-о-о», а потом — «Т»!",
+    chaser: "🐰", // the puller
+    fleer: "🥕", // the prize
+    theme: "meadow",
+    pattern: holdStop("о", "stop", "Т"), // identical to «кот» — the «т» pops the carrot
+  },
+  // --- ready for later (not surfaced in the picker yet) ---
   {
     id: "dom",
     type: "chase",
@@ -79,4 +96,16 @@ export const WORDS: WordScene[] = [
   },
 ];
 
-export const DEFAULT_WORD = WORDS[0];
+export const DEFAULT_WORD = WORDS[0]; // кот (chase) — the picker's default
+
+/**
+ * The play modes surfaced in the start-screen scene picker (issue #16), in
+ * display order — the DEFAULT (chase) first, so choosing nothing reproduces the
+ * pre-#16 flow. Both share the identical «т»/hold acoustic pattern; they differ
+ * only in `type` (the render branch). дом/кит stay unsurfaced (extra chase words,
+ * not extra modes).
+ */
+export const PICKABLE_SCENES: WordScene[] = [
+  WORDS.find((w) => w.id === "kot")!,
+  WORDS.find((w) => w.id === "vot")!,
+];

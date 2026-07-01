@@ -1,14 +1,22 @@
 /**
- * A WordScene is the content unit of the game. The MVP ships one (`кот`), but
- * the chase mechanic is fully generic: any word shaped like
+ * A WordScene is the content unit of the game. The acoustic mechanic is fully
+ * generic: any word shaped like
  *   [sustainable vowel/sonorant] + [final stop]
- * reskins into a chase by swapping the two emoji and the on-screen text.
+ * reskins by swapping the two emoji and the on-screen text.
  *
- * Add a scene = add a data object. No new code required for more chase words.
+ * Two axes of variation, and they cost differently:
+ *   - a new *word* on an existing `SceneType` is DATA ONLY — add a data object,
+ *     no new code (кот/дом/кит all reskin the one chase render path);
+ *   - a new *mode* (a new `SceneType`) needs a matching render branch in
+ *     `GameView` + a picker entry, because a mode is a different *picture*, not a
+ *     different word. The «т»/hold acoustic stack is reused verbatim across modes.
+ *
+ * Modes shipped (issue #16): `"chase"` (кот — the cat runs the mouse) and
+ * `"pull"` (вот — the rabbit pulls the carrot free). See root CLAUDE.md.
  */
 import type { Vowel } from "../audio/PhoneticFeatures";
 
-export type SceneType = "chase";
+export type SceneType = "chase" | "pull";
 
 /**
  * The acoustic shape a scene asks for — one rung of the phonetic ladder
@@ -79,10 +87,17 @@ export interface WordScene {
   /** Short instruction for the caregiver, e.g. "Тяни звук, потом — Т!". */
   hint: string;
 
-  // --- chase reskin ---
-  /** The pursuer emoji (e.g. cat). */
+  // --- actor reskin (two emoji; their ROLE depends on `type`) ---
+  /**
+   * The active actor. `type: "chase"` → the pursuer (cat); `type: "pull"` → the
+   * puller (rabbit). Reused across modes rather than adding mode-specific fields,
+   * so the content model stays two-emoji-and-text for every `SceneType`.
+   */
   chaser: string;
-  /** The one who flees (e.g. mouse). */
+  /**
+   * The passive actor / goal. `type: "chase"` → the one who flees (mouse);
+   * `type: "pull"` → the prize being pulled free (carrot).
+   */
   fleer: string;
   /** Background theme key. */
   theme: "meadow";

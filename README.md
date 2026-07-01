@@ -5,6 +5,12 @@ child is shown a word as a little scene (e.g. **кот** — a cat and a mouse).
 the child makes sound, the cat chases the mouse; a final burst makes the cat
 pounce and a happy celebration plays. The child's own voice drives the fun.
 
+**Two play modes (#16), chosen on the start screen:** 🐱 **Догонялки** — the кот
+chase above — and 🐰 **Морковка** — a rabbit hauls a carrot out of the ground, and
+it pops free on «…Т» (= «вот!»). Both are the *same* acoustic word (hold «о-о-о»,
+then «т»): the pull reuses кот's exact pattern, physics, strictness slider, and
+celebration — only the picture differs. See `CLAUDE.md` for the scene/mode model.
+
 UI and content are in Russian.
 
 ## The core rule: no word recognition, but phonetic-feature sensing
@@ -170,14 +176,17 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   **assist-scaled** (#12): toward easy a breath-stop gap still wins, toward strict
   only the «т» burst does. A lenient "counts as trying" gate + the graded speed +
   the `assist` knob keep it forgiving. Pure and deterministic.
-- **`src/game/GameView.ts`** — the canvas chase. The drive is a tug-of-war (#12):
+- **`src/game/GameView.ts`** — the canvas render. The drive is a tug-of-war (#12):
   net progress = `catDrive − mouseFlee`, with `mouseFlee = strictness·MOUSE_FLEE_RATE`,
   clamped to `[0, PRECHASE_CAP]`. At the easy end the mouse never flees and
   progress is monotonic (today's feel, byte-for-byte); toward strict it can decay
-  to 0. Cat speed = `MIN_FLOOR + (1−MIN_FLOOR)·driveQuality`, the catch gated on a
+  to 0. Actor speed = `MIN_FLOOR + (1−MIN_FLOOR)·driveQuality`, the catch gated on a
   real hold + stop; with the matcher off it is the exact pre-#1 loudness path
-  (`stepPlay(match=null)`, no flee). The cat and mouse become friends at the end
-  (hearts, not a kill).
+  (`stepPlay(match=null)`, no flee). `draw()` branches on `scene.type` (#16):
+  `drawChase` (the cat closes on the mouse, then they become friends) and
+  `drawPull` (a rabbit raises a carrot via `carrotDepth(progress)`, the «т» pops
+  it free, then it's hugged) — sharing the state machine, physics, and particles.
+  The ending is a hug, never a kill.
 - **`src/game/MeterView.ts`** — the "I can hear you" indicator for the mic-check
   screen, so a caregiver can confirm the mic before involving the child. The
   mic-check doubles as the vowel-baseline calibration window.
@@ -196,8 +205,12 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   optional `release.want: "stop"` for Rung 3, and the target `release.letter` it
   teaches — «кот»/«кит» ask for a real «т»). The acoustic trigger is the letter's
   coarse *class* (a stop burst), never the letter itself (telling «т» from «к»/«п»
-  is the banned ASR territory). The chase mechanic is generic, so adding a
-  `[hold]+[stop]` word (дом, кит, …) is just adding data.
+  is the banned ASR territory). `SceneType` picks the *picture* — `"chase"` (кот)
+  or `"pull"` (вот, #16); `PICKABLE_SCENES` are the two the picker surfaces.
+  Adding a `[hold]+[stop]` **word** on an existing type is data-only (дом, кит, …);
+  a new **mode** (`SceneType`) also needs a `GameView` render branch — see
+  `CLAUDE.md`. `src/game/round.ts`'s `buildSceneMatcher` builds a round's matcher
+  from the active scene's pattern (shared by `main.ts` and the picker test).
 - **`src/game/config.ts`** — the `PhoneticConfig` single source of truth (issue
   #4): per-rung flags (`rung1`/`rung2`/`rung3`), the `assist` continuum, a
   `debug` flag, and the read-only `showLetter` chip flag (#13), plus a tiny
@@ -205,12 +218,14 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   private-mode storage all degrade to `DEFAULT_CONFIG`. The engine reads
   `anyRungOn(config)` (widened by `showLetter` for the formant pass); the matcher
   reads `assist` + `rung1` + `rung2` (with the per-child formant baseline) + `rung3`.
-- **`src/main.ts`** — screen flow (start → mic check → game), the single master
-  render loop, mic-permission handling, the graceful denied/error fallback,
-  the per-round matcher wiring, the caregiver settings panel (per-rung toggles +
-  assist + the read-only live-vowel chip toggle + debug, persisted live), the
-  live-vowel chip render on the check/game screens, and the vowel-baseline
-  calibration sampled on the mic-check screen.
+- **`src/main.ts`** — screen flow (start → mic check → game), the **start-screen
+  scene picker** (#16 — two cards; the chosen scene is set active before
+  mic-check), the single master render loop, mic-permission handling, the graceful
+  denied/error fallback, the per-round matcher wiring (via `buildSceneMatcher`),
+  the caregiver settings panel (per-rung toggles + assist + the read-only
+  live-vowel chip toggle + debug, persisted live), the live-vowel chip render on
+  the check/game screens, and the vowel-baseline calibration sampled on the
+  mic-check screen.
 
 ## Caregiver affordances
 
@@ -240,15 +255,22 @@ npm test           # vitest: pure DSP (incl. the `detectStopBurst` shape test),
 The DSP and the state machine are pure, and `AudioEngine` accepts an injected
 fake analyser, so the suite runs in plain Node — no jsdom, no microphone.
 
-## Extending — the word bank & phonetic ladder
+## Extending — modes, the word bank & phonetic ladder
 
-`src/game/words.ts` already contains extra scenes (дом, кит) ready to surface;
-they grade on **Rung 1** (vowel-ish vs noise) and each tags a target `vowel` for
-**Rung 2** when it is switched on. The design space:
+Two axes, and they cost differently (see `CLAUDE.md`):
 
-- More `[sustainable vowel/sonorant] + [stop]` words: дом, мяч, кит, гусь.
-- Onomatopoeia (gold here): мууу, ааам, бууух — these would add a new
-  `SceneType` beyond `"chase"`.
+- A new **word** on an existing `SceneType` is **data-only** — `src/game/words.ts`
+  already holds extra chase scenes (дом, кит) ready to surface; they grade on
+  **Rung 1** and each tags a target `vowel` for **Rung 2**. More
+  `[sustainable vowel/sonorant] + [stop]` words: дом, мяч, кит, гусь.
+- A new **mode** (a new `SceneType`) needs a **`GameView` render branch + a picker
+  entry**. Built so far: `"chase"` (кот) and `"pull"` (вот, #16). Next candidates —
+  onomatopoeia (gold here): мууу, ааам, бууух.
+- The **phonetic discrimination ladder** (issue #1): Rung 0 = hold→gap→stop
+  shape · Rung 1 = vowel vs noise (built) · Rung 2 = which vowel (formants,
+  built — #5, default off) · Rung 3 = consonant class / real «т» stop (built —
+  #6, default off) · Rung 4 = syllable. Each new rung is a finer
+  `AcousticPattern` + (for ≥2) new features in `PhoneticFeatures.ts`.
 - The **phonetic discrimination ladder** (issue #1): Rung 0 = hold→gap→stop
   shape · Rung 1 = vowel vs noise (built) · Rung 2 = which vowel (formants,
   built — #5, default off) · Rung 3 = consonant class / real «т» stop (built —
