@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AudioEngine } from "../src/audio/AudioEngine";
 import { PatternMatcher } from "../src/game/PatternMatcher";
+import { LetterIndicator } from "../src/game/LetterIndicator";
 import type { AcousticPattern } from "../src/game/types";
 import {
   FakeAnalyser,
@@ -257,5 +258,127 @@ describe("AudioEngine → PatternMatcher Rung 3 integration (#6/#12)", () => {
     const r = runRung3(O_HOLD, 150, [], 0); // long hold, no closure/burst at all
     expect(r.holdSatisfied).toBe(true);
     expect(r.caught).toBe(false);
+  });
+});
+
+// --- #13: the live-vowel chip is read-only, and widens the formant pass -------
+
+/** Ambient-quiet warmup so the noise floor calibrates low; returns the next `t`. */
+function warmup(engine: AudioEngine, analyser: FakeAnalyser): number {
+  analyser.time = new Float32Array(1024);
+  analyser.freqDb = silentSpectrumDb();
+  let t = 0;
+  for (let i = 0; i < 90; i++) {
+    engine.sample(t);
+    t += STEP;
+  }
+  return t;
+}
+
+describe("live-vowel chip wiring (#13)", () => {
+  it("AC#5: chip on + all rungs off (rung2Enabled widened) still emits F1/F2 on a voiced vowel", () => {
+    // applyEngineFlags with all rungs off but showLetter on → both flags true.
+    const analyser = new FakeAnalyser();
+    const engine = new AudioEngine({ analyser, sampleRate: SR });
+    engine.setPhoneticEnabled(true);
+    engine.setRung2Enabled(true);
+    let t = warmup(engine, analyser);
+    analyser.time = sineTime(280, 0.3);
+    analyser.freqDb = vowelSpectrumDb(560, 950);
+    let f = engine.sample(t);
+    for (let i = 0; i < 20; i++) {
+      t += STEP;
+      f = engine.sample(t);
+    }
+    expect(f.voiced).toBe(true);
+    expect(f.f1).toBeGreaterThan(0);
+    expect(f.f2).toBeGreaterThan(0);
+
+    // Chip off (and rungs off) → the formant pass is skipped, F1/F2 stay 0.
+    const a2 = new FakeAnalyser();
+    const e2 = new AudioEngine({ analyser: a2, sampleRate: SR });
+    e2.setPhoneticEnabled(true);
+    e2.setRung2Enabled(false);
+    let t2 = warmup(e2, a2);
+    a2.time = sineTime(280, 0.3);
+    a2.freqDb = vowelSpectrumDb(560, 950);
+    let f2 = e2.sample(t2);
+    for (let i = 0; i < 20; i++) {
+      t2 += STEP;
+      f2 = e2.sample(t2);
+    }
+    expect(f2.f1).toBe(0);
+    expect(f2.f2).toBe(0);
+  });
+
+  it("AC#6: running the chip's indicator never changes the matcher's verdicts", () => {
+    // Drive one identical canned «о»→silence sequence through the REAL engine +
+    // a rung1 matcher twice: once with the chip's formant pass ON and the
+    // LetterIndicator updated each frame ("show on"), once without ("show off").
+    // The chip reads only frame fields the matcher ignores at rung1 (f1/f2) and
+    // shares no state with it, so the verdict stream is element-for-element equal.
+    type V = { driveQuality: number; holdSatisfied: boolean; caught: boolean };
+    const runs: V[][] = [];
+    for (const showOn of [true, false]) {
+      const analyser = new FakeAnalyser();
+      const engine = new AudioEngine({ analyser, sampleRate: SR });
+      engine.setVowelBaseline(BASE_A);
+      engine.setPhoneticEnabled(true);
+      engine.setRung2Enabled(showOn); // the only engine difference the toggle makes
+      const matcher = new PatternMatcher(PATTERN, { assist: 0, rung1: true });
+      const li = showOn ? new LetterIndicator() : null;
+      const out: V[] = [];
+      let t = warmup(engine, analyser);
+      const drive = (time: Float32Array, freqDb: Float32Array, frames: number) => {
+        analyser.time = time;
+        analyser.freqDb = freqDb;
+        for (let i = 0; i < frames; i++) {
+          const frame = engine.sample(t);
+          li?.update(
+            { f1: frame.f1, f2: frame.f2 },
+            frame.level,
+            frame.voiced,
+            engine.getVowelBaseline(),
+            STEP,
+          );
+          const m = matcher.update(frame, STEP);
+          out.push({ driveQuality: m.driveQuality, holdSatisfied: m.holdSatisfied, caught: m.caught });
+          t += STEP;
+        }
+      };
+      drive(sineTime(300, 0.3), tonalSpectrumDb(7), 60); // «о-о-о» hold
+      drive(new Float32Array(1024), silentSpectrumDb(), 60); // the stop
+      runs.push(out);
+    }
+    expect(runs[0]).toEqual(runs[1]); // read-only: identical, frame for frame
+    // Guard against a vacuous all-equal-because-all-zero pass: the run really
+    // held and caught, so the equality above is meaningful.
+    expect(runs[0].some((v) => v.holdSatisfied)).toBe(true);
+    expect(runs[0].some((v) => v.caught)).toBe(true);
+  });
+
+  it("chip text updates from canned frames: a held «о» settles the chip on «О»", () => {
+    const analyser = new FakeAnalyser();
+    const engine = new AudioEngine({ analyser, sampleRate: SR });
+    engine.setVowelBaseline(BASE_A);
+    engine.setPhoneticEnabled(true);
+    engine.setRung2Enabled(true);
+    const li = new LetterIndicator();
+    let t = warmup(engine, analyser);
+    analyser.time = HELD_O.time;
+    analyser.freqDb = HELD_O.freqDb;
+    let verdict = li.update({ f1: 0, f2: 0 }, 0, false, BASE_A, STEP);
+    for (let i = 0; i < 40; i++) {
+      const frame = engine.sample(t);
+      verdict = li.update(
+        { f1: frame.f1, f2: frame.f2 },
+        frame.level,
+        frame.voiced,
+        engine.getVowelBaseline(),
+        STEP,
+      );
+      t += STEP;
+    }
+    expect(verdict.vowel).toBe("о");
   });
 });

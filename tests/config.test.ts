@@ -41,6 +41,7 @@ describe("config store (loadConfig / saveConfig)", () => {
       rung3: true,
       assist: 0.8,
       debug: true,
+      showLetter: true,
     };
     saveConfig(cfg, s);
     expect(loadConfig(s)).toEqual(cfg);
@@ -89,6 +90,23 @@ describe("config store (loadConfig / saveConfig)", () => {
     a.assist = 0.1;
     expect(DEFAULT_CONFIG.assist).toBe(0.5);
   });
+
+  it("#13: showLetter defaults off and round-trips through storage", () => {
+    expect(DEFAULT_CONFIG.showLetter).toBe(false);
+    expect(loadConfig(new MemoryStorage()).showLetter).toBe(false);
+    const s = new MemoryStorage();
+    saveConfig({ ...DEFAULT_CONFIG, showLetter: true }, s);
+    expect(loadConfig(s).showLetter).toBe(true);
+  });
+
+  it("#13: coerces a bad showLetter to its default and keeps a partial blob's other keys", () => {
+    const s = new MemoryStorage();
+    s.map.set(STORAGE_KEY, JSON.stringify({ showLetter: "yes" }));
+    expect(loadConfig(s).showLetter).toBe(DEFAULT_CONFIG.showLetter); // non-boolean → default
+    const s2 = new MemoryStorage();
+    s2.map.set(STORAGE_KEY, JSON.stringify({ showLetter: true }));
+    expect(loadConfig(s2)).toEqual({ ...DEFAULT_CONFIG, showLetter: true }); // merges with defaults
+  });
 });
 
 describe("anyRungOn", () => {
@@ -134,6 +152,7 @@ describe("AC#2: all rungs off reproduces the loudness-only trajectory", () => {
       rung3: false,
       assist: 0.5,
       debug: false,
+      showLetter: false,
     };
     // This is exactly the decision `buildMatcher()` makes in main.ts.
     const match = anyRungOn(allOff) ? ({} as never) : null;

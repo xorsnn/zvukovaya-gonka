@@ -7,9 +7,13 @@ import {
   vowelLikeness,
   estimateFormants,
   vowelMatch,
+  classifyVowel,
   classifyConsonant,
   detectStopBurst,
   STOP_BURST_MAX_CLOSURE_MS,
+  VOWELS,
+  VOWEL_FORMANTS,
+  type Vowel,
   type ReleaseFrame,
 } from "../src/audio/PhoneticFeatures";
 import { sineTime, noiseTime } from "./_helpers";
@@ -264,6 +268,63 @@ describe("vowelMatch", () => {
     // neutral, never propagate into a NaN driveQuality that freezes the cat.
     expect(vowelMatch({ f1: NaN, f2: 950 }, "о", baseA)).toBe(1);
     expect(vowelMatch({ f1: 560, f2: NaN }, "о", baseA)).toBe(1);
+  });
+});
+
+// --- #13: classifyVowel (all-vowel argmax) --------------------------------
+
+describe("classifyVowel (Rung 2 argmax, #13)", () => {
+  // She calibrated holding «а»; that anchors her formant space.
+  const baseA = { centroid: 1100, f1: CHILD.а.f1, f2: CHILD.а.f2 };
+
+  /** Where target `v` sits in HER space (canonical map scaled by her-«а»): a
+   * frame placed here scores exactly 1 for `v`, so `v` must win the argmax. */
+  const scaledCentre = (v: Vowel) => ({
+    f1: baseA.f1 * (VOWEL_FORMANTS[v].f1 / VOWEL_FORMANTS["а"].f1),
+    f2: baseA.f2 * (VOWEL_FORMANTS[v].f2 / VOWEL_FORMANTS["а"].f2),
+  });
+
+  it("AC#2: picks each vowel as argmax when the frame sits at its her-scaled centre", () => {
+    for (const v of VOWELS) {
+      const c = classifyVowel(scaledCentre(v), baseA);
+      expect(c.vowel).toBe(v);
+      expect(c.confidence).toBe(1); // exact: log(1)=0 → exp(0)=1 at the centre
+    }
+  });
+
+  it("AC#2: scores[v] === vowelMatch(formants, v, baseline) for every vowel", () => {
+    const f = scaledCentre("о");
+    const c = classifyVowel(f, baseA);
+    for (const v of VOWELS) {
+      expect(c.scores[v]).toBe(vowelMatch(f, v, baseA));
+    }
+    // and confidence is exactly the winning (argmax) score.
+    expect(c.confidence).toBe(c.scores[c.vowel!]);
+    expect(c.confidence).toBe(Math.max(...VOWELS.map((v) => c.scores[v])));
+  });
+
+  it("AC#2: a real «о» frame reports «о», а «и» frame reports «и»", () => {
+    expect(classifyVowel(CHILD.о, baseA).vowel).toBe("о");
+    expect(classifyVowel(CHILD.и, baseA).vowel).toBe("и");
+  });
+
+  const NEUTRAL = { vowel: null, confidence: 0, scores: { а: 0, о: 0, у: 0, и: 0 } };
+
+  it("AC#1: no usable baseline → null verdict, all-zero scores (never a 4-way 1-tie)", () => {
+    expect(classifyVowel({ f1: 600, f2: 1200 }, null)).toEqual(NEUTRAL);
+    expect(classifyVowel({ f1: 600, f2: 1200 }, { centroid: 1100 })).toEqual(NEUTRAL); // no f1/f2
+    // half a baseline (only f1) is also "no opinion", like vowelMatch.
+    expect(
+      classifyVowel({ f1: 600, f2: 1200 }, { centroid: 1100, f1: baseA.f1 }),
+    ).toEqual(NEUTRAL);
+  });
+
+  it("AC#1: a missing / zero / NaN estimate → null verdict, all-zero scores", () => {
+    expect(classifyVowel({ f1: 0, f2: 0 }, baseA)).toEqual(NEUTRAL); // silence sentinel
+    expect(classifyVowel({ f1: 600, f2: 0 }, baseA)).toEqual(NEUTRAL); // half estimate
+    // `!(f > 0)` (not `f <= 0`) so a NaN formant also degrades to no opinion.
+    expect(classifyVowel({ f1: NaN, f2: 1200 }, baseA)).toEqual(NEUTRAL);
+    expect(classifyVowel({ f1: 600, f2: NaN }, baseA)).toEqual(NEUTRAL);
   });
 });
 

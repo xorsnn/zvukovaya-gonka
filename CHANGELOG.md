@@ -4,6 +4,59 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.7.0] - 2026-07-01
+
+Live vowel indicator (issue #13) — a **read-only** caregiver chip that shows
+which of the four vowels («А»/«О»/«У»/«И», or «—») the held sound is most like
+right now, plus a thin confidence bar. It gives the adult live, grounded
+encouragement ("yes — that was an «О»!") and lets the dev validate the formant
+detector on a real mic without the green `?debug` overlay. It is orthogonal to
+grading — a pure display that never changes how the chase drives, holds, or
+catches (so it is independent of #12's tug-of-war). Ships behind
+`config.showLetter`, **off by default**; with it off the default build behaves
+exactly as 0.6.0.
+
+### Added
+- **`classifyVowel` (PhoneticFeatures.ts)** — the all-vowel argmax companion to
+  `vowelMatch`: scores an (F1, F2) against а/о/у/и at once in the child's own
+  calibrated formant space and returns the winner + per-vowel scores. Same
+  NaN-safe neutral guard as `vowelMatch`, but returns all-zero scores (not a
+  meaningless 4-way `1`-tie) when there's no usable baseline/estimate. Still not
+  recognition — no classifier, no gate.
+- **`LetterIndicator` (src/game/LetterIndicator.ts)** — a small, deterministic,
+  unit-tested smoother + display gate: per-vowel EMA (120 ms half-life) over the
+  raw argmax, plus a level/voiced input gate and a score-floor + runner-up-margin
+  display gate, so the chip settles in ~8 frames and a single stray frame can't
+  flip the glyph. Holds no audio state beyond the four EMA scores; feeds nothing
+  back into grading (the read-only invariant).
+- **`showLetter` config flag + «показывать букву» ⚙ toggle** — persisted to
+  `localStorage` like the other settings, default off. Turning it on widens the
+  engine's spectral + formant passes (`setPhoneticEnabled`/`setRung2Enabled` are
+  now driven by `anyRungOn(config) || config.showLetter` and `config.rung2 ||
+  config.showLetter`) so the chip works even with every rung off. The mic-check
+  vowel-baseline calibration is likewise run when the chip is on, so it has a
+  per-child anchor to classify against.
+- **The chip UI** — a fixed top-right pill rendered on the mic-check and game
+  screens only, created lazily so it costs nothing when off. Deliberately adult,
+  not a reward: a neutral gray glyph on a translucent dark pill, no animation /
+  bounce / color-pop, so it never competes with the chase for the child.
+
+### Tests
+- `classifyVowel`: per-vowel argmax at each her-scaled centre, `scores[v] ===
+  vowelMatch`, and the neutral guards (no baseline / half baseline / zero / NaN
+  estimate). `LetterIndicator`: convergence, single-frame anti-flicker, and every
+  gate branch (level, voiced, score floor, margin, no baseline). `config`:
+  `showLetter` default/persist/coerce. Integration: the widened formant pass emits
+  F1/F2 with rungs off, the chip settles on «О» from canned frames through the
+  real engine, and — the read-only invariant — running the indicator alongside a
+  rung-1 matcher leaves its `driveQuality`/`holdSatisfied`/`caught` stream
+  element-for-element unchanged.
+
+### Not yet done (deferred to real-mic tuning)
+- The chip's thresholds (`HALF_LIFE_MS`, `SCORE_MIN`, `MARGIN_MIN`, `LEVEL_GATE`)
+  are set from synthetic-signal reasoning; the manual E2E (hold «о»→«О», «и»→«И»,
+  noise→«—»; no flicker; works with rungs off) still needs a real microphone.
+
 ## [0.6.0] - 2026-07-01
 
 Tug-of-war chase (issue #12): the **vowel runs the cat, the «т» triggers the

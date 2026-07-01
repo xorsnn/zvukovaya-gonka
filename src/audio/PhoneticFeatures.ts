@@ -378,6 +378,68 @@ export function vowelMatch(
   return clamp01(Math.exp(-dist2 / s));
 }
 
+/** All four nucleus vowels, in a fixed order so {@link classifyVowel}'s argmax
+ * breaks ties deterministically (а wins a tie over о, etc.). */
+export const VOWELS: readonly Vowel[] = ["а", "о", "у", "и"] as const;
+
+/**
+ * The result of scoring a held sound against ALL four target vowels at once —
+ * the read-only "which vowel is this most like?" readout the caregiver chip
+ * shows (#13). It is the argmax companion to {@link vowelMatch}, which scores
+ * against ONE target. STILL NOT speech recognition: same coarse, her-calibrated
+ * formant-region match, only run for every vowel and reported, never fed back
+ * into how the chase grades.
+ */
+export interface VowelClassification {
+  /** The argmax vowel, or null = "no opinion" (gated out / no usable estimate). */
+  vowel: Vowel | null;
+  /** 0..1 — the winning vowel's match score (the argmax value). */
+  confidence: number;
+  /** Per-vowel 0..1 match (each === {@link vowelMatch} for that vowel). */
+  scores: Record<Vowel, number>;
+}
+
+/**
+ * classifyVowel — score an observed (F1, F2) against every nucleus vowel and
+ * report the most-likely one. Pure: feed it canned formants in a test (AC#1/#2).
+ *
+ * For a usable baseline + estimate, `scores[v]` is exactly {@link vowelMatch}
+ * for that vowel (same «а»-anchor, same ratios, same {@link VOWEL_MATCH_SIGMA}),
+ * `vowel` is the argmax, and `confidence` is the winning score.
+ *
+ * NEUTRAL GUARD (up front, before any `vowelMatch` call): with no usable formant
+ * baseline (`baseline.f1`/`f2` missing) or no estimate (`f1`/`f2` is `0`/`NaN` —
+ * `0` is the silence sentinel `estimateFormants` returns) we return all-zero
+ * scores and `vowel: null`. Scores are 0 (NOT vowelMatch's neutral 1) on purpose:
+ * calling `vowelMatch` with no baseline returns 1 for EVERY vowel — a meaningless
+ * 4-way tie — so we short-circuit instead. Uses the same NaN-safe `!(f > 0)`
+ * check as `vowelMatch`, so a NaN formant also degrades to "no opinion".
+ *
+ * This function does NO gating or smoothing — it is the raw per-frame argmax. The
+ * flicker gate + EMA live in {@link LetterIndicator}.
+ */
+export function classifyVowel(
+  formants: { f1: number; f2: number },
+  baseline?: VowelBaseline | null,
+): VowelClassification {
+  const { f1, f2 } = formants;
+  if (!baseline || !baseline.f1 || !baseline.f2 || !(f1 > 0) || !(f2 > 0)) {
+    return { vowel: null, confidence: 0, scores: { а: 0, о: 0, у: 0, и: 0 } };
+  }
+  const scores: Record<Vowel, number> = { а: 0, о: 0, у: 0, и: 0 };
+  let best: Vowel | null = null;
+  let bestScore = -Infinity;
+  for (const v of VOWELS) {
+    const s = vowelMatch(formants, v, baseline);
+    scores[v] = s;
+    if (s > bestScore) {
+      bestScore = s;
+      best = v;
+    }
+  }
+  return { vowel: best, confidence: bestScore, scores };
+}
+
 // ===========================================================================
 // Rung 3 (#6) — coarse consonant class & the real «т» stop.
 //
