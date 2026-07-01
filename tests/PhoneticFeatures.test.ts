@@ -10,6 +10,7 @@ import {
   classifyVowel,
   classifyConsonant,
   detectStopBurst,
+  burstOptsForAssist,
   STOP_BURST_MAX_CLOSURE_MS,
   VOWELS,
   VOWEL_FORMANTS,
@@ -478,5 +479,39 @@ describe("detectStopBurst (#12)", () => {
     // no fresh rising edge, so it is edge-triggered (one frame), not held.
     const afterEdge = [...Array(5).fill(VOWEL), CLOSED, CLOSED, CLOSED, VOWEL, VOWEL];
     expect(detectStopBurst(afterEdge, FLOOR, DT)).toBe(false);
+  });
+});
+
+// --- #18: burstOptsForAssist maps the строго↔легче slider onto the «т» bounds --
+
+describe("burstOptsForAssist (#18)", () => {
+  it("AC#7: every knob is monotonic toward легче — легче ≥ строго in forgiveness", () => {
+    // Sample the slider densely and require each knob to move only in its
+    // more-forgiving direction as assist rises (a lower/higher bound = looser «т»).
+    const steps = Array.from({ length: 11 }, (_, i) => i / 10);
+    for (let i = 1; i < steps.length; i++) {
+      const lo = burstOptsForAssist(steps[i - 1]);
+      const hi = burstOptsForAssist(steps[i]);
+      expect(hi.loudRatio!).toBeLessThanOrEqual(lo.loudRatio!); // quieter vowel still counts
+      expect(hi.dipFraction!).toBeGreaterThanOrEqual(lo.dipFraction!); // shallower dip = closure
+      expect(hi.riseFraction!).toBeLessThanOrEqual(lo.riseFraction!); // gentler transient = burst
+      expect(hi.minClosureMs!).toBeLessThanOrEqual(lo.minClosureMs!); // shorter closure OK
+      expect(hi.maxClosureMs!).toBeGreaterThanOrEqual(lo.maxClosureMs!); // wider window OK
+    }
+  });
+
+  it("легче (1) is strictly more forgiving than строго (0) on every knob", () => {
+    const strict = burstOptsForAssist(0);
+    const easy = burstOptsForAssist(1);
+    expect(easy.loudRatio!).toBeLessThan(strict.loudRatio!);
+    expect(easy.dipFraction!).toBeGreaterThan(strict.dipFraction!);
+    expect(easy.riseFraction!).toBeLessThan(strict.riseFraction!);
+    expect(easy.minClosureMs!).toBeLessThan(strict.minClosureMs!);
+    expect(easy.maxClosureMs!).toBeGreaterThan(strict.maxClosureMs!);
+  });
+
+  it("clamps out-of-range assist to the endpoints", () => {
+    expect(burstOptsForAssist(-1)).toEqual(burstOptsForAssist(0));
+    expect(burstOptsForAssist(2)).toEqual(burstOptsForAssist(1));
   });
 });

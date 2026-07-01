@@ -2,8 +2,10 @@
 
 A voice-driven game that helps kids with speech delay start vocalizing. The
 child is shown a word as a little scene (e.g. **кот** — a cat and a mouse). While
-the child makes sound, the cat chases the mouse; a final burst makes the cat
-pounce and a happy celebration plays. The child's own voice drives the fun.
+the child sustains the vowel the cat advances to an "almost there" checkpoint and
+waits; then the child's final **«Т»** makes the cat pounce and a happy celebration
+plays (issue #18). The child's own voice drives the fun — and producing that final
+stop, the therapeutic goal, is what finishes the round.
 
 **Two play modes (#16), chosen on the start screen:** 🐱 **Догонялки** — the кот
 chase above — and 🐰 **Морковка** — a rabbit hauls a carrot out of the ground, and
@@ -49,20 +51,30 @@ the 120 ms-smoothed `voiced` path, so a natural 50–150 ms «т» closure actua
 fires (the original burst-catch keyed off `voiced`, which needs ~387 ms of silence
 to drop, and was inert on real speech; #12 replaces it). The detector is still not
 recognition — it reads the envelope *shape*, never the phoneme, and can't tell «т»
-from «к»/«п» (place of articulation). It ships behind `config.rung3`, **off by
-default**; with it off behavior is exactly Rung 1/2.
+from «к»/«п» (place of articulation). Since #18 it ships behind `config.rung3`
+**on by default**; with it off behavior is exactly Rung 1/2 (the rollback).
 
-**The chase is now a tug-of-war (#12).** The vowel runs the cat; the final «т»
-triggers the pounce. Net progress is `catDrive − mouseFlee`, with the mouse's
-flee speed scaled by the one **строго ↔ легче** (strict ↔ easy) slider, so the same
-build serves a child who just needs to vocalize and one ready to drill the «т»:
+**The two-phase «Т» win (#18).** On a «т»-final scene (кот / вот / кит) the round
+is now two phases, identical across both modes:
 
-- At the **easy** end the mouse never flees (progress is monotonic, exactly as
-  before) and simply running out of breath still finishes the catch.
-- At the **strict** end the right vowel makes the cat gain while a wrong vowel or
-  silence lets the mouse escape back toward the start, and the catch fires **only**
-  on a real «т» burst — running out of breath no longer wins. The escape hatch is
-  the slider itself, not a fail screen.
+1. **Approach (forward-only).** The child sustains the vowel and the actor
+   advances, speed graded by `vowelLikeness`. On a stop scene the #12 mouse-flee is
+   retired — the actor only moves forward (`strictnessFor` returns `0`), so it can't
+   drift backward.
+2. **Checkpoint (freeze + wait).** Once the vowel hold arms (`holdSatisfied`,
+   ~600 ms, assist-scaled), the actor parks at the "almost there" pose and
+   **freezes**. A pause here is neutral — it neither wins nor loses. A "now say Т!"
+   cue lights.
+
+From the checkpoint **only a real «Т» finishes** — the pounce/carrot-pop fires on
+the fast `detectStopBurst`, or, if the child pauses arbitrarily long first, on a
+pause-tolerant `armedBurst` re-onset (guarded so re-starting the *vowel* never
+false-fires). The run-out-of-breath pause **no longer wins** — producing the stop
+is the point. The one **строго ↔ легче** slider is the difficulty dial over *both*
+phases: toward легче a shorter vowel arms **and** a gentler «Т» is accepted
+(`burstOptsForAssist`); toward строго a longer/cleaner vowel **and** a crisper «Т».
+That looser «Т» is the escape hatch that replaces the retired pause-win, so a
+struggling child always has a gentler path — never a fail screen.
 
 **Live vowel indicator (#13)** — a **read-only** caregiver chip (top-right) that
 shows which of the four vowels («А»/«О»/«У»/«И», or «—») the held sound is most
@@ -82,12 +94,13 @@ features):
 - **Any** voiced sound above the noise floor still makes the cat run; a clearer,
   steadier vowel just makes it run **faster** (graded by `vowelLikeness`, never
   punished). This rewards _vocalizing at all_ — the therapeutic goal — while
-  nudging toward the target sound. Toward the strict end the mouse also flees, so
-  the *right* vowel is what keeps the cat gaining (the tug-of-war, #12).
-- The **pounce** arms only after a real sustained vowel-like **hold**, and the
-  catch needs a genuine **stop** — a near-silence gap (the lenient
-  run-out-of-breath finale) or, toward strict, the real **«т» burst** — which a
-  continuous scream never produces and a single short shout never reaches.
+  nudging toward the target sound. On a non-stop word (дом) the strict end still
+  adds the #12 mouse-flee; a stop scene is forward-only (it parks at the checkpoint).
+- The **pounce** arms only after a real sustained vowel-like **hold**. On a «т»-final
+  scene the catch then needs a genuine **«Т»** (the fast burst, or a pause-tolerant
+  armed re-onset) — a pause never finishes it (#18). On a non-stop word the catch is
+  still the near-silence **gap** (the lenient run-out-of-breath finale). Either way a
+  continuous scream never produces the stop, and a single short shout never arms.
 
 ### Leniency is mandatory (the whole reason ASR was banned)
 
@@ -108,11 +121,12 @@ tug-of-war at the strict end — but never a fail screen and never a scold.
    off — or flip a single misbehaving one off, live, mid-session — and the game
    reverts to the exact shipped loudness-only engine.
 4. The **строго ↔ легче** (strict ↔ easy) `assist` slider is the single difficulty
-   dial. At the easy end it is as forgiving as the old loudness-only feel (no
-   flee, a breath-stop still wins) — for a noisy room, a detector miss, or a child
-   who just needs to vocalize. Toward strict it raises the bar (the mouse flees,
-   the «т» burst is required). It relaxes or tightens the gate continuously; it
-   never silently bypasses it.
+   dial. On a «т»-final scene it grades *both* phases (#18): toward легче a shorter
+   vowel arms **and** a gentler «Т» is accepted (`burstOptsForAssist`); toward строго
+   a longer/cleaner vowel **and** a crisper «Т». The looser «Т» is the escape hatch —
+   a struggling child always has a gentler stop to reach for, replacing the retired
+   pause-win. On a non-stop word the slider still tunes the #12 flee + hold instead.
+   It relaxes or tightens the gate continuously; it never silently bypasses it.
 
 There is no timer, no score, no fail state. A child can never lose.
 
@@ -232,9 +246,11 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
 Small, kid-ignorable controls at the bottom of the game screen.
 **🔊 Послушать** hears the word modelled by TTS. A **⚙** gear opens a caregiver
 settings panel — hidden by default so a 3-yr-old can't trip it — holding a
-per-rung toggle (**гласные/шум**, **какая гласная**, **согласные/Т**), the
-**строго ↔ легче** (strict ↔ easy) slider that relaxes the phonetic grading for a
-noisy room, a **показывать букву** toggle (the read-only live-vowel chip, #13),
+per-rung toggle (**гласные/шум**, **какая гласная**, **согласные/Т** — the last now
+**on by default**, driving the two-phase «Т» win; turn it off to fall back to the
+loudness/gap-catch game), the **строго ↔ легче** (strict ↔ easy) slider that both
+relaxes the phonetic grading for a noisy room and loosens the required «Т», a
+**показывать букву** toggle (the read-only live-vowel chip, #13),
 an **отладка** (debug) toggle, and **🎤 микрофон** (re-run the mic
 check / recalibration). Every change is saved to `localStorage` and applied live,
 so a misbehaving rung can be switched off mid-session and the setting survives a
@@ -274,27 +290,32 @@ Two axes, and they cost differently (see `CLAUDE.md`):
 - The **phonetic discrimination ladder** (issue #1): Rung 0 = hold→gap→stop
   shape · Rung 1 = vowel vs noise (built) · Rung 2 = which vowel (formants,
   built — #5, default off) · Rung 3 = consonant class / real «т» stop (built —
-  #6, default off) · Rung 4 = syllable. Each new rung is a finer
-  `AcousticPattern` + (for ≥2) new features in `PhoneticFeatures.ts`.
-- Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` / `MOUSE_FLEE_RATE` in
-  `GameView.ts`, the `VOWEL_WEIGHTS` blend and the `STOP_BURST_*` detector bounds
-  in `PhoneticFeatures.ts`, `BURST_REQUIRED_ASSIST` / `VOWEL_MATCH_FLOOR(_STRICT)`
+  #6, **default on** since #18 — the two-phase «Т» win) · Rung 4 = syllable. Each
+  new rung is a finer `AcousticPattern` + (for ≥2) new features in
+  `PhoneticFeatures.ts`.
+- Knobs: `MIN_FLOOR` / `CHASE_RATE` / `POUNCE_READY` / `MOUSE_FLEE_RATE` /
+  `strictnessFor` in `GameView.ts`, the `VOWEL_WEIGHTS` blend, the `STOP_BURST_*`
+  detector bounds and the `burstOptsForAssist` slider mapping in
+  `PhoneticFeatures.ts`, `ARMED_BURST_VOWEL_FLOOR` / `VOWEL_MATCH_FLOOR(_STRICT)`
   in `PatternMatcher.ts`, and the per-scene `AcousticPattern` (`minMs`,
   `requireGapMs`) in `words.ts`.
 
 ## Tuning notes
 
 If the cat reacts too eagerly or too sluggishly in a particular room, reach for
-the **строго ↔ легче** slider first (it sets both the mouse's flee speed and how
-strictly the «т» is required). Beyond that, the relevant constants are the
-noise-floor multipliers and the `FAST_ENV_*` time constants in `AudioEngine.ts`,
-the chase constants at the top of `GameView.ts` (`MIN_FLOOR`, `CHASE_RATE`,
-`POUNCE_READY`, `MOUSE_FLEE_RATE`), the `STOP_BURST_*` detector bounds +
-`VOWEL_WEIGHTS` blend in `PhoneticFeatures.ts`, and `BURST_REQUIRED_ASSIST` in
-`PatternMatcher.ts`. The **«т» stop-burst thresholds and the default assist are
-placeholders** — they were chosen to make the mechanic demonstrable in tests and
-**must be set on a real microphone with the child** (turn on `?debug=1`: it shows
-the live `stopBurst`, the net cat-vs-flee drive, and the target letter). If the
+the **строго ↔ легче** slider first (on a «т»-final scene it sets both how long/clean
+the vowel must be to arm **and** how forgiving the required «Т» is). Beyond that, the
+relevant constants are the noise-floor multipliers and the `FAST_ENV_*` time
+constants in `AudioEngine.ts`, the chase constants at the top of `GameView.ts`
+(`MIN_FLOOR`, `CHASE_RATE`, `POUNCE_READY`, `MOUSE_FLEE_RATE`), the `STOP_BURST_*`
+detector bounds + the `burstOptsForAssist` slider mapping + the `VOWEL_WEIGHTS`
+blend in `PhoneticFeatures.ts`, and `ARMED_BURST_VOWEL_FLOOR` (the pause-tolerant
+armed-«Т» guard) in `PatternMatcher.ts`. The **«т» stop-burst thresholds, the
+`burstOptsForAssist` endpoints, and the default assist are placeholders** — they
+were chosen to make the mechanic demonstrable in tests and **must be set on a real
+microphone with the child** (turn on `?debug=1`: it shows the live `stopBurst`, the
+`⚑ARMED waiting-«Т»` checkpoint state, and the target letter — and the **`k`** key
+latches the checkpoint so you can drill the armed «Т» against real pauses). If the
 spectral layer ever misbehaves on real hardware, flip the offending rung off in
 the ⚙ settings panel (or turn every rung off) to revert to the shipped
 loudness-only engine instantly, mid-session — no reload, no rebuild. The mechanic

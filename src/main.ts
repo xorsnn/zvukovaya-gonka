@@ -178,6 +178,9 @@ function applyEngineFlags(): void {
   audio.setRung2Enabled(config.rung2 || config.showLetter);
 }
 applyEngineFlags();
+// The «т» detector's sensitivity tracks the same строго↔легче dial as the matcher
+// (#18), so seed it from the loaded config and keep it in sync on every change.
+audio.setAssist(config.assist);
 
 /** Hold threshold for vowel-likeness; tightened/relaxed by mic-check calibration. */
 let calibHoldThreshold = MIN_HOLD_THRESHOLD;
@@ -290,6 +293,7 @@ letterToggle.addEventListener("change", () => {
 assistSlider.addEventListener("input", () => {
   config.assist = parseFloat(assistSlider.value);
   matcher?.setAssist(config.assist);
+  audio.setAssist(config.assist); // keep the «т» detector on the same dial (#18)
   saveConfig(config);
 });
 
@@ -413,6 +417,16 @@ function setDebugVisible(on: boolean): void {
 }
 setDebugVisible(urlDebug || config.debug);
 
+// Debug jump (#18): «k» (checkpoint) latches the round into the armed/parked state
+// so the next «т» wins — tune the pause-tolerant armed «т» against real pauses
+// without re-doing the vowel each time. Ignored unless debug is on AND we're on
+// the game screen, so normal play never sees it.
+window.addEventListener("keydown", (e) => {
+  if (e.key === "k" && (urlDebug || config.debug) && current === "game") {
+    game.debugArmCheckpoint();
+  }
+});
+
 function dbgBar(x: number, n = 10): string {
   const k = Math.max(0, Math.min(n, Math.round(x * n)));
   return "█".repeat(k) + "·".repeat(n - k);
@@ -446,7 +460,8 @@ function renderDebug(frame: AudioFrame): void {
     `${config.rung3 ? `    class ${m?.consonantClass ?? "none"}${letter ? ` →«${letter}»` : ""}${frame.stopBurst ? "  STOP-BURST✓" : ""}${m?.burstDetected ? "  CAUGHT-BURST✓" : ""}\n` : ""}` +
     `── hold ${m ? Math.round(m.sustainHeldMs) : 0}/${Math.round(effMin)}ms` +
     `  thr ${f(effHold)}  assist ${f(config.assist, 1)}\n` +
-    `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}`;
+    `   ${m?.holdSatisfied ? "HOLD✓" : "hold·"}   ${m?.caught ? "CATCH✓" : "catch·"}` +
+    `${m?.armedForBurst ? "   ⚑ARMED waiting-«Т» (k=jump)" : ""}`;
 }
 
 // ---------- live-vowel chip (issue #13) ----------
@@ -550,9 +565,13 @@ function updateWordHighlight(frame: { voiced: boolean }): void {
   if (game.state === "play") {
     sustainEl.classList.toggle("active", frame.voiced && game.inputEnabled);
     burstEl.classList.toggle("hot", game.nearPounce);
+    // At the two-phase checkpoint (#18) the «т» is now the only way to finish, so
+    // it gets a stronger, unmistakable "now say Т" cue on top of the hot pulse.
+    burstEl.classList.toggle("checkpoint", game.armedForBurst);
   } else {
     sustainEl.classList.remove("active");
     burstEl.classList.remove("hot");
+    burstEl.classList.remove("checkpoint");
   }
 }
 

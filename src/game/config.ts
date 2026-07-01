@@ -11,10 +11,12 @@
  * The rungs are ADDITIVE refinements stacked on Rung 1 (vowel-ish vs noise):
  *   - rung1 — vowel-ish vs noise/hiss (Increment 1; shipped on).
  *   - rung2 — vowel identity (wired in #5; default off, a no-op until then).
- *   - rung3 — consonant class / a real «т» stop (wired in #6; default off).
- * With rung2/rung3 off, behavior is exactly Rung-1-as-shipped. With ALL rungs
- * off, the game is the pre-#1 loudness-only engine — that is the kill-switch,
- * and {@link anyRungOn} is its generalization of `USE_PHONETIC`.
+ *   - rung3 — consonant class / a real «т» stop (wired in #6). Since #18 it also
+ *     powers the two-phase «т» win on a "stop" scene and ships ON by default.
+ * With rung2 off (and on a non-stop word, rung3), behavior is exactly
+ * Rung-1-as-shipped. With ALL rungs off, the game is the pre-#1 loudness-only
+ * engine — that is the kill-switch, and {@link anyRungOn} is its generalization
+ * of `USE_PHONETIC`. That all-off identity is preserved byte-for-byte by #18.
  *
  * The store is defensive by design: a missing key, corrupt JSON, a partial or
  * older blob, private-mode storage, or a throwing/quota-full `localStorage` all
@@ -27,7 +29,9 @@ export interface PhoneticConfig {
   rung1: boolean;
   /** Rung 2: vowel identity — wired in #5, a no-op until then. */
   rung2: boolean;
-  /** Rung 3: consonant class / real «т» stop — wired in #6, a no-op until then. */
+  /** Rung 3: consonant class / real «т» stop. Wired in #6; since #18 it also
+   * drives the two-phase «т» win (the vowel arms a checkpoint, only a real «т»
+   * finishes — the pause no longer wins) on a "stop" scene, and defaults ON. */
   rung3: boolean;
   /** 0..1 leniency continuum (the строго↔легче slider). */
   assist: number;
@@ -43,7 +47,7 @@ export interface PhoneticConfig {
 export const DEFAULT_CONFIG: PhoneticConfig = {
   rung1: true,
   rung2: false,
-  rung3: false,
+  rung3: true, // #18: the two-phase «т» win is the intended default experience.
   assist: 0.5,
   debug: false,
   showLetter: false,

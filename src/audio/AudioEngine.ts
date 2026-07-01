@@ -35,6 +35,8 @@ import {
   vowelLikeness,
   estimateFormants,
   detectStopBurst,
+  burstOptsForAssist,
+  type StopBurstOpts,
   type VowelBaseline,
 } from "./PhoneticFeatures";
 
@@ -152,6 +154,10 @@ export class AudioEngine {
   private fastEnv = 0;
   /** Rolling history of `fastEnv` (oldest→newest) the pure detector reads. */
   private fastEnvHist: number[] = [];
+  /** The «т» stop-burst bounds for the current строго↔легче assist (#18), cached
+   * from {@link setAssist} so the hot path allocates no opts object per frame.
+   * Defaults to the mid (0.5) mapping, ≈ the exported `STOP_BURST_*` defaults. */
+  private burstOpts: StopBurstOpts = burstOptsForAssist(0.5);
 
   // Adaptive noise floor. Starts pessimistic, calibrates down quickly to the
   // real ambient level, then tracks slow upward drift in room noise.
@@ -302,6 +308,18 @@ export class AudioEngine {
   }
 
   /**
+   * Set the строго↔легче assist (#18) so the «т» stop-burst detector tracks the
+   * slider: toward легче a quieter/gentler/wider «т» still fires, toward строго it
+   * demands a crisper one. The host calls this on init and on every slider input
+   * (the SAME value it hands the matcher). Recomputes the bounds once here, not
+   * per frame. Off-path for a disabled phonetic layer — the opts are only read
+   * inside the `phoneticEnabled` block.
+   */
+  setAssist(assist: number): void {
+    this.burstOpts = burstOptsForAssist(assist);
+  }
+
+  /**
    * Read one frame. Call once per requestAnimationFrame. Cheap (one pass over a
    * 1024-sample buffer, one over the 512-bin spectrum). Returns a neutral frame
    * until the mic is running.
@@ -425,7 +443,7 @@ export class AudioEngine {
       this.fastEnv += (rawRms - this.fastEnv) * (rawRms > this.fastEnv ? fAttack : fRelease);
       this.fastEnvHist.push(this.fastEnv);
       if (this.fastEnvHist.length > FAST_ENV_HIST_FRAMES) this.fastEnvHist.shift();
-      stopBurst = detectStopBurst(this.fastEnvHist, this.noiseFloor, dt);
+      stopBurst = detectStopBurst(this.fastEnvHist, this.noiseFloor, dt, this.burstOpts);
     }
 
     return {

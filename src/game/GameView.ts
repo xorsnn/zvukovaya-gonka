@@ -157,6 +157,22 @@ export function carrotDepth(progress: number): number {
 }
 
 /**
+ * strictnessFor — the tug-of-war strictness (#18) for a scene's approach phase.
+ *
+ * A `release.want === "stop"` scene (кот/вот/кит) is now **forward-only**: since
+ * the two-phase win makes the pause matter directly (only a real «т» finishes —
+ * see {@link PatternMatcher}), the #12 mouse-flee is retired for it, so the actor
+ * advances and then PARKS at the checkpoint waiting for the «т» — it never drifts
+ * backward. Returns `0` there. Every other scene keeps the #12 tug-of-war,
+ * `1 - assist`. Pure + exported so the forward-only guarantee (AC#6) is unit-
+ * testable without a canvas. `stepPlay`'s math is unchanged — this only feeds it a
+ * `strictness` of 0 for stop scenes, which is exactly its byte-for-byte easy path.
+ */
+export function strictnessFor(scene: WordScene, assist: number): number {
+  return scene.pattern.release.want === "stop" ? 0 : 1 - assist;
+}
+
+/**
  * GameView renders one scene to a canvas — a chase (кот) or a pull (вот, #16) —
  * and drives it entirely from the audio loudness/phonetic envelope.
  *
@@ -248,6 +264,27 @@ export class GameView {
     return this.displayProgress >= POUNCE_READY - 0.08;
   }
 
+  /**
+   * True while parked at the two-phase checkpoint (#18) — a satisfied hold on a
+   * Rung-3 "stop" scene, waiting for the «т». Drives the stronger "now say Т" cue
+   * (host chip); false on non-stop / rung3-off / loudness paths.
+   */
+  get armedForBurst(): boolean {
+    return this.lastMatch?.armedForBurst ?? false;
+  }
+
+  /**
+   * Debug jump (#18): land the round in the armed/parked checkpoint so the next
+   * «т» wins — lets the armed «т» be tuned against real pauses without re-doing the
+   * vowel each attempt. No-op unless we're mid-play with a matcher; the host binds
+   * it to the `k` key behind the debug flag only.
+   */
+  debugArmCheckpoint(): void {
+    if (this.state !== "play" || !this.matcher) return;
+    this.matcher.forceHoldSatisfied();
+    this.progress = Math.max(this.progress, PRECHASE_CAP);
+  }
+
   reset(): void {
     this.state = "play";
     this.progress = 0;
@@ -294,9 +331,11 @@ export class GameView {
         : null;
     this.lastMatch = match;
 
-    // Strictness (the inverse of the assist slider) sets the mouse's flee speed.
-    // 0 when there's no matcher (loudness path) so AC#5's byte-for-byte holds.
-    const strictness = this.matcher ? 1 - this.matcher.assist : 0;
+    // Strictness sets the mouse's flee speed (#12). Per-scene now (#18):
+    // `strictnessFor` returns 0 for a "stop" scene (forward-only — the actor parks
+    // at the checkpoint and waits for the «т» instead of fleeing), else 1 - assist.
+    // Still 0 with no matcher (loudness path) so AC#5's byte-for-byte holds.
+    const strictness = this.matcher ? strictnessFor(this.scene, this.matcher.assist) : 0;
     const res = stepPlay(this.progress, frame, dts, match, this.inputEnabled, strictness);
     this.progress = res.progress;
 
@@ -406,9 +445,50 @@ export class GameView {
     if (this.scene.type === "pull") this.drawPull(now);
     else this.drawChase(now);
 
+    // Two-phase checkpoint cue (#18): once armed and parked, a shared "now say Т"
+    // badge lights over the goal — the visible "you're almost there" moment. Only
+    // while waiting for the «т» (armedForBurst), so дом / non-stop scenes never see it.
+    if (this.state === "play" && this.armedForBurst) this.drawWaitCue(now);
+
     // celebration extras (shared across modes)
     this.drawConfetti();
     this.drawHearts();
+  }
+
+  /**
+   * The "now say Т" checkpoint cue (#18): a gentle pulsing badge carrying the
+   * scene's target letter, over the goal (the mouse / the carrot) — where the «т»
+   * lands. Purely cosmetic; it drives nothing (the win is still `match.caught`).
+   * Warm and encouraging, never a countdown or a scold (no fail state).
+   */
+  private drawWaitCue(now: number): void {
+    const { ctx, w, h } = this;
+    const letter = this.scene.burstPart || "!";
+    const charSize = Math.min(h * 0.2, w * 0.16);
+    // Anchor over the goal: the fleeing mouse for a chase, the planted carrot for a pull.
+    const gx = this.scene.type === "pull" ? w * 0.56 : this.mouseX(this.displayProgress);
+    const gy = this.groundY - charSize * 0.95;
+    const pulse = 0.5 + 0.5 * Math.sin(now / 240);
+    const r = Math.min(w, h) * 0.05 * (1 + 0.12 * pulse);
+
+    ctx.save();
+    // soft halo
+    ctx.fillStyle = `rgba(255,210,90,${0.22 + 0.16 * pulse})`;
+    ctx.beginPath();
+    ctx.arc(gx, gy, r * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    // badge
+    ctx.fillStyle = "#ff8a3d";
+    ctx.beginPath();
+    ctx.arc(gx, gy, r, 0, Math.PI * 2);
+    ctx.fill();
+    // the target letter
+    ctx.fillStyle = "#fff";
+    ctx.font = `800 ${Math.round(r * 1.15)}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(letter, gx, gy + r * 0.06);
+    ctx.restore();
   }
 
   /** Chase render path (кот): the cat closes on the mouse, leaps, then befriends it. */

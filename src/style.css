@@ -274,6 +274,24 @@ body {
     text-shadow: 0 0 22px rgba(255, 93, 115, 0.9);
   }
 }
+/* Two-phase checkpoint (#18): parked, waiting for the «т» — a stronger, warmer
+   "now say Т!" than the plain hot pulse. Overrides burst-pulse when both apply. */
+.word-card .burst.checkpoint {
+  animation: burst-checkpoint 0.7s ease-in-out infinite;
+}
+@keyframes burst-checkpoint {
+  0%,
+  100% {
+    transform: scale(1.1);
+    color: #ff8a3d;
+    text-shadow: 0 0 10px rgba(255, 138, 61, 0.7);
+  }
+  50% {
+    transform: scale(1.6);
+    color: #ff6a1a;
+    text-shadow: 0 0 30px rgba(255, 138, 61, 1);
+  }
+}
 .word-card .hint {
   font-size: clamp(12px, 2.8vw, 18px);
   font-weight: 700;
