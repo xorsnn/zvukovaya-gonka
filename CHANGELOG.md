@@ -4,6 +4,61 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.11.0] - 2026-07-02
+
+**Detection-test screen** (issue #22) — a dev/caregiver-only surface for tuning
+the acoustic thresholds *with the child*, answering the question the game and the
+cramped `?debug` overlay never did directly: **"When she says А, does the detector
+read А? When she says the «т» in кот, does the burst fire — and how often?"** It
+is a diagnostic tool: it **measures** detection quality and never touches
+gameplay, the matcher, or the shipped config. Reached **only** via `?test=1` or
+the ⚙ panel's **[🎯 Тест звуков]** button — same gating as «отладка».
+
+Two coexisting parts:
+- **Live readout** — per-vowel а/о/у/и bars (`classifyVowel`) + the smoothed,
+  gated letter (a screen-local `LetterIndicator`); F1/F2; vowelLikeness / ZCR /
+  centroid / lowBand bars; the coarse consonant class (`classifyConsonant` over a
+  rolling `ReleaseFrame` ring); and a STOP-BURST flash with "last burst N мс назад".
+- **Target practice** — pick а/о/у/и/Т; each valid voiced burst is auto-segmented
+  into one attempt and scored by what the game/chip actually act on (the modal
+  gated verdict across the sustained core for a vowel; a `stopBurst` in the
+  [onset, release+250 ms] window for Т). Shows a live hit rate + a confusion
+  breakdown; «—» (weak / ambiguous / below-gate) is a real outcome, not an error.
+
+Fully **additive and default-off**: with neither `?test` nor the ⚙ button used,
+the shipped game path's runtime behavior is unchanged — the AC#1/AC#5 identity
+guardrails (kill-switch + `strictness = 0` loudness path) stay green.
+
+### Added
+- `src/game/SoundTest.ts` — pure, DOM-free (no `Date.now()`/`Math.random()`)
+  scoring logic: a `BurstAccumulator` (segments the frame stream into one attempt
+  per voiced burst + a validity filter that drops clicks / room noise),
+  `burstVerdict(frames, target)` (the modal-gated-core rule for vowels / the
+  burst-in-window rule for Т), and a `ScoreTally` reducer (hits + confusion).
+- `tests/SoundTest.test.ts` — 17 unit + canned-sequence tests (verdict picks the
+  sustained vowel / excludes the attack / ties → «—»; Т burst-in-window incl. the
+  post-release tail; validity filter; tally + reset; two end-to-end streams).
+
+### Changed
+- `src/main.ts` — widened `Screen` with `"test"`; added the screen markup, nav
+  (`?test=1` deep-link that requests the mic if needed → routes to test on grant /
+  the shared denied screen on refusal; the ⚙ button; «← назад»), the transient
+  engine-flag force on enter + `applyEngineFlags()` restore on leave, the
+  screen-local detectors (`LetterIndicator` / `ReleaseFrame` ring / `testBaseline`
+  / accumulator / tally), and `renderSoundTest` (the only new `loop()` call site,
+  so play's hot path is untouched). The inline «Подержи ААА» calibrate stores into
+  the **screen-local** baseline only — `audio.getVowelBaseline()` is never touched,
+  so the game's session baseline is preserved.
+- `src/style.css` — an adult/neutral dark test panel (bars, big glyph, monospace
+  readout, target/score controls) — deliberately not a reward surface.
+
+### Notes
+- The screen **measures**; it does not retune. Changing any detector threshold is
+  the #11/#12 follow-up, done *with* this screen on a real mic with the child — the
+  acoustic constants remain placeholders, not finalized by unit tests alone.
+- Out of scope by design: per-consonant identity (banned ASR), frame export to
+  JSON, and persisting the baseline / tally across reloads (session-only).
+
 ## [0.10.0] - 2026-07-02
 
 **URL navigation for the two experiences** (issue #20). The active mode is now

@@ -4,6 +4,21 @@ import { MeterView } from "./game/MeterView";
 import { GameView, MIN_FLOOR, MOUSE_FLEE_RATE } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { LetterIndicator } from "./game/LetterIndicator";
+import {
+  classifyVowel,
+  classifyConsonant,
+  type ReleaseFrame,
+  type Vowel,
+  type VowelBaseline,
+} from "./audio/PhoneticFeatures";
+import {
+  BurstAccumulator,
+  ScoreTally,
+  burstVerdict,
+  TEST_TARGETS,
+  type TestTarget,
+  type Detected,
+} from "./game/SoundTest";
 import { DEFAULT_WORD, PICKABLE_SCENES } from "./game/words";
 import { buildSceneMatcher } from "./game/round";
 import { resolveSceneParam, SCENE_PARAM } from "./game/navigation";
@@ -11,7 +26,10 @@ import type { WordScene } from "./game/types";
 import { speakWord } from "./game/sfx";
 import { loadConfig, saveConfig, anyRungOn } from "./game/config";
 
-type Screen = "start" | "check" | "denied" | "game";
+// The detection-test screen (#22) is a dev/caregiver-only tuning surface, reached
+// only via `?test=1` or the ⚙ panel's [Тест звуков] button. It never touches
+// gameplay, the matcher, or the shipped config.
+type Screen = "start" | "check" | "denied" | "game" | "test";
 
 const app = document.getElementById("app")!;
 const audio = new AudioEngine();
@@ -78,6 +96,32 @@ app.innerHTML = `
           <label><input type="checkbox" id="debugToggle" /> <span>отладка</span></label>
           <button class="parent-link" id="recalBtn">🎤 микрофон</button>
         </div>
+        <button class="parent-link test-open-btn" id="testOpenBtn">🎯 Тест звуков</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen test" data-screen="test">
+    <div class="test-panel">
+      <div class="test-head">
+        <button class="parent-link" id="testBackBtn">← назад</button>
+        <span class="test-title">Тест распознавания</span>
+      </div>
+      <div class="test-letter-row">
+        <span class="test-glyph" id="testGlyph">—</span>
+        <div class="test-vowel-bars" id="testVowelBars"></div>
+      </div>
+      <p class="test-hint" id="testCalibHint">нужна калибровка</p>
+      <button class="btn btn-small test-calib-btn" id="testCalibBtn">🎤 Подержи «ААА»</button>
+      <pre class="test-readout" id="testReadout"></pre>
+      <div class="test-score">
+        <div class="test-score-head">
+          <span class="test-target-label">Цель: <b id="testTarget">А</b></span>
+          <button class="parent-link" id="testNextTargetBtn">следующая ▸</button>
+        </div>
+        <p class="test-score-line" id="testScoreLine">0 / 0 · 0%</p>
+        <p class="test-confusion" id="testConfusion"></p>
+        <button class="parent-link" id="testResetBtn">сбросить счёт</button>
       </div>
     </div>
   </section>
@@ -110,6 +154,37 @@ const burstEl = el<HTMLElement>("#burstEl");
 const hintEl = el<HTMLElement>("#hintEl");
 const deniedTitle = el<HTMLElement>("#deniedTitle");
 const deniedText = el<HTMLElement>("#deniedText");
+// detection-test screen refs (#22)
+const testOpenBtn = el<HTMLButtonElement>("#testOpenBtn");
+const testBackBtn = el<HTMLButtonElement>("#testBackBtn");
+const testCalibBtn = el<HTMLButtonElement>("#testCalibBtn");
+const testNextTargetBtn = el<HTMLButtonElement>("#testNextTargetBtn");
+const testResetBtn = el<HTMLButtonElement>("#testResetBtn");
+const testGlyph = el<HTMLElement>("#testGlyph");
+const testVowelBars = el<HTMLElement>("#testVowelBars");
+const testCalibHint = el<HTMLElement>("#testCalibHint");
+const testReadout = el<HTMLElement>("#testReadout");
+const testTargetEl = el<HTMLElement>("#testTarget");
+const testScoreLine = el<HTMLElement>("#testScoreLine");
+const testConfusion = el<HTMLElement>("#testConfusion");
+
+// The four vowel bars are built once; renderSoundTest paints each fill per frame.
+const TEST_VOWELS: readonly Vowel[] = ["а", "о", "у", "и"];
+const testBarFills: Partial<Record<Vowel, HTMLElement>> = {};
+for (const v of TEST_VOWELS) {
+  const row = document.createElement("div");
+  row.className = "test-bar";
+  const label = document.createElement("span");
+  label.className = "test-bar-label";
+  label.textContent = v.toUpperCase();
+  const track = document.createElement("div");
+  track.className = "test-bar-track";
+  const fill = document.createElement("i");
+  track.appendChild(fill);
+  row.append(label, track);
+  testVowelBars.appendChild(row);
+  testBarFills[v] = fill;
+}
 
 // ---------- scene picker (issue #16) ----------
 // Two play modes on the start screen: 🐱 Догонялки (chase, кот — the default) and
@@ -333,6 +408,7 @@ debugToggle.addEventListener("change", () => {
 let current: Screen = "start";
 
 function showScreen(name: Screen): void {
+  const wasTest = current === "test";
   current = name;
   for (const s of document.querySelectorAll<HTMLElement>(".screen")) {
     s.classList.toggle("active", s.dataset.screen === name);
@@ -346,6 +422,12 @@ function showScreen(name: Screen): void {
       startRound();
     });
   }
+  // Entering/leaving the detection-test screen (#22): it forces the spectral +
+  // formant passes ON (so every detector has data even under the default config),
+  // then restores config-driven flags on leave (AC#8). Order matters — force
+  // AFTER a restore can't fire (we only restore when we WERE on test).
+  if (name === "test") enterTestScreen();
+  else if (wasTest) applyEngineFlags();
   // Reflect the read-only chip: reset its smoother on any screen change and
   // show it only on the listening screens (AC#7). It holds no game state.
   letterIndicator.reset();
@@ -377,7 +459,15 @@ game.onCatch = () => {
 };
 
 // ---------- buttons ----------
-startBtn.addEventListener("click", () => beginMic());
+// Where to route once the mic is granted. The normal flow goes to the mic-check;
+// the `?test=1` deep-link (#22) overrides this to the detection-test screen. The
+// shared retry button honours whatever destination is pending.
+let onMicReady: () => void = () => showScreen("check");
+
+startBtn.addEventListener("click", () => {
+  onMicReady = () => showScreen("check");
+  beginMic();
+});
 retryBtn.addEventListener("click", () => beginMic());
 
 async function beginMic(): Promise<void> {
@@ -389,7 +479,7 @@ async function beginMic(): Promise<void> {
   if (ok) {
     audio.recalibrate();
     resetCalibrationSamples();
-    showScreen("check");
+    onMicReady();
   } else if (audio.status === "denied") {
     deniedTitle.textContent = "Нужен микрофон 🎤";
     deniedText.textContent =
@@ -416,6 +506,22 @@ recalBtn.addEventListener("click", () => {
   resetCalibrationSamples();
   checkHint.textContent = "Настраиваю…";
   showScreen("check");
+});
+
+// detection-test screen nav (#22). The ⚙ button always has a running mic (opened
+// mid-game), so it goes straight to the screen; «← назад» returns to start.
+testOpenBtn.addEventListener("click", () => {
+  settingsPanel.toggleAttribute("hidden", true);
+  gearBtn.setAttribute("aria-expanded", "false");
+  showScreen("test");
+});
+testBackBtn.addEventListener("click", () => showScreen("start"));
+testCalibBtn.addEventListener("click", () => startTestCalibration());
+testNextTargetBtn.addEventListener("click", () => cycleTestTarget());
+testResetBtn.addEventListener("click", () => {
+  testTally.reset();
+  testAccumulator.reset();
+  renderTestTally();
 });
 
 // ---------- debug overlay (?debug=1 in the URL OR the «отладка» toggle) ----------
@@ -547,6 +653,193 @@ function renderLetterChip(frame: AudioFrame, dtMs: number): void {
   letterBarEl!.style.width = `${Math.round(conf * 100)}%`;
 }
 
+// ---------- detection-test screen (issue #22) ----------
+// A dev/caregiver-only tuning surface: a live readout of every detector plus a
+// target-practice scorer. It follows the chip's read-only invariant (#13) — its
+// detectors are SCREEN-LOCAL (a private LetterIndicator, a ReleaseFrame ring, a
+// screen-local vowel baseline) and share nothing with the matcher or the game's
+// session baseline. The pure segmentation/verdict/tally logic lives in
+// `SoundTest.ts`; here we only sample frames, feed them, and paint the DOM.
+const testLetterIndicator = new LetterIndicator();
+const testAccumulator = new BurstAccumulator();
+const testTally = new ScoreTally();
+// A rolling window of recent frames for classifyConsonant (~0.4 s at 60 fps —
+// enough to hold a vowel, a 50–150 ms closure, and a burst).
+const testReleaseRing: ReleaseFrame[] = [];
+const TEST_RING_LEN = 24;
+// Screen-local baseline: set by the inline «Подержи ААА» calibrate, fed to
+// classifyVowel + the screen's LetterIndicator. It is NEVER pushed to
+// audio.setVowelBaseline(), so the game's session baseline is untouched (AC#4).
+let testBaseline: VowelBaseline | null = null;
+let testTarget: TestTarget = "а";
+// ms since the last real stop-burst (Infinity = none yet). Drives the flash +
+// the "N мс назад" readout without needing a wall clock — pure dt accumulation.
+let testBurstAgoMs = Infinity;
+// Inline-calibration sampling state (mirrors the mic-check rule: voiced && level>0.2).
+let testCalibrating = false;
+let tcF1: number[] = [];
+let tcF2: number[] = [];
+let tcCentroid: number[] = [];
+let tcElapsedMs = 0;
+
+/** Reset all screen-local state on entry + force the engine passes on (AC#8). */
+function enterTestScreen(): void {
+  // Force the spectral + formant passes ON so every detector has data even with
+  // the default config (rung2 off, showLetter off). Transient — showScreen()
+  // restores config-driven flags via applyEngineFlags() when we leave.
+  audio.setPhoneticEnabled(true);
+  audio.setRung2Enabled(true);
+  testLetterIndicator.reset();
+  testAccumulator.reset();
+  testTally.reset();
+  testReleaseRing.length = 0;
+  testBaseline = null;
+  testCalibrating = false;
+  testTarget = "а";
+  testBurstAgoMs = Infinity;
+  testGlyph.textContent = "—";
+  testCalibHint.textContent = "нужна калибровка";
+  renderTestTarget();
+  renderTestTally();
+}
+
+/** Begin sampling a fresh screen-local baseline from a held «ААА». */
+function startTestCalibration(): void {
+  testCalibrating = true;
+  tcF1 = [];
+  tcF2 = [];
+  tcCentroid = [];
+  tcElapsedMs = 0;
+  testAccumulator.reset(); // the calibration hold is not a scoring attempt
+  testCalibHint.textContent = "держи «ААА»…";
+}
+
+/** Finalize calibration: store the mean into the SCREEN-LOCAL baseline only. */
+function finishTestCalibration(): void {
+  testCalibrating = false;
+  const f1 = mean(tcF1);
+  const f2 = mean(tcF2);
+  if (tcF1.length >= 12 && f1 > 0 && f2 > 0) {
+    testBaseline = { centroid: mean(tcCentroid), f1, f2 };
+    testCalibHint.textContent = "калибровка готова ✓";
+  } else {
+    testBaseline = null; // too few valid samples — keep the letter at «—»
+    testCalibHint.textContent = "мало данных — ещё раз";
+  }
+  testLetterIndicator.reset();
+}
+
+/** Cycle а→о→у→и→Т→а; switching target resets the tally + any half-burst (AC#5). */
+function cycleTestTarget(): void {
+  const i = TEST_TARGETS.indexOf(testTarget);
+  testTarget = TEST_TARGETS[(i + 1) % TEST_TARGETS.length];
+  testTally.reset();
+  testAccumulator.reset();
+  renderTestTarget();
+  renderTestTally();
+}
+
+/** Display glyph for a target/detected label (vowels upper-cased; Т/«—» as-is). */
+function testLabelGlyph(l: Detected): string {
+  return l === "Т" || l === "—" ? l : l.toUpperCase();
+}
+
+/** The confusion columns to show for the current target. */
+function testConfusionLabels(): Detected[] {
+  return testTarget === "Т" ? ["Т", "—"] : ["а", "о", "у", "и", "—"];
+}
+
+function renderTestTarget(): void {
+  testTargetEl.textContent = testLabelGlyph(testTarget);
+}
+
+function renderTestTally(): void {
+  const t = testTally.snapshot();
+  const pct = t.total > 0 ? Math.round((t.hits / t.total) * 100) : 0;
+  testScoreLine.textContent = `${t.hits} / ${t.total} · ${pct}%`;
+  testConfusion.textContent = testConfusionLabels()
+    .map((l) => `${testLabelGlyph(l)}:${t.confusion[l]}`)
+    .join("   ");
+}
+
+/**
+ * The test screen's per-frame work (the ONLY new call site in loop(), so play's
+ * hot path is untouched — AC#10). Runs every screen-local detector, feeds the
+ * scorer, and paints the readout.
+ */
+function renderSoundTest(frame: AudioFrame, dtMs: number): void {
+  const formants = { f1: frame.f1, f2: frame.f2 };
+
+  // Inline calibration: sample her fresh F1/F2/centroid until ≥12 valid frames
+  // or a 3 s cap, whichever first (mic-check's voiced && level>0.2 rule).
+  if (testCalibrating) {
+    tcElapsedMs += dtMs;
+    if (frame.voiced && frame.level > 0.2) {
+      tcCentroid.push(frame.centroid);
+      if (frame.f1 > 0 && frame.f2 > 0) {
+        tcF1.push(frame.f1);
+        tcF2.push(frame.f2);
+      }
+    }
+    if (tcF1.length >= 12 || tcElapsedMs >= 3000) finishTestCalibration();
+  }
+
+  // 1) live vowel bars (raw per-vowel scores) + the smoothed, gated letter.
+  const cls = classifyVowel(formants, testBaseline);
+  const gated = testLetterIndicator.update(
+    formants,
+    frame.level,
+    frame.voiced,
+    testBaseline,
+    dtMs,
+  );
+  for (const v of TEST_VOWELS) {
+    testBarFills[v]!.style.width = `${Math.round(cls.scores[v] * 100)}%`;
+  }
+  testGlyph.textContent = gated.vowel ? gated.vowel.toUpperCase() : "—";
+
+  // 2) consonant class over the rolling ReleaseFrame ring.
+  testReleaseRing.push({ voiced: frame.voiced, zcr: frame.zcr });
+  if (testReleaseRing.length > TEST_RING_LEN) testReleaseRing.shift();
+  const cclass = classifyConsonant(testReleaseRing);
+
+  // 3) stop-burst flash + "last burst N мс назад" (held ~200 ms so a single-frame
+  // event is visible).
+  testBurstAgoMs = frame.stopBurst ? 0 : testBurstAgoMs + dtMs;
+  const burstHot = testBurstAgoMs <= 200;
+  const burstAgo =
+    testBurstAgoMs === Infinity ? "—" : `${Math.round(testBurstAgoMs)} мс назад`;
+
+  // 4) scalar feature readout (reuse dbgBar formatting).
+  testReadout.textContent =
+    `vowelLike ${frame.vowelLikeness.toFixed(2)} ${dbgBar(frame.vowelLikeness)}\n` +
+    `      zcr ${frame.zcr.toFixed(2)} ${dbgBar(frame.zcr)}\n` +
+    ` centroid ${Math.round(frame.centroid)} Hz ${dbgBar(Math.min(1, frame.centroid / 4000))}\n` +
+    `  lowBand ${frame.lowBandRatio.toFixed(2)} ${dbgBar(frame.lowBandRatio)}\n` +
+    `    F1/F2 ${Math.round(frame.f1)} / ${Math.round(frame.f2)} Hz\n` +
+    `    класс ${cclass}\n` +
+    `      «Т» ${burstHot ? "СТОП-ВЗРЫВ ✓" : "·"}  (${burstAgo})`;
+  testReadout.classList.toggle("burst-hot", burstHot);
+
+  // 5) scoring: feed the accumulator; a closed valid attempt is scored + tallied.
+  // Skip while calibrating — the calibration hold is not an attempt.
+  if (!testCalibrating) {
+    const attempt = testAccumulator.push({
+      dtMs,
+      level: frame.level,
+      voiced: frame.voiced,
+      onset: frame.onset,
+      release: frame.release,
+      gatedVowel: gated.vowel,
+      stopBurst: frame.stopBurst,
+    });
+    if (attempt) {
+      testTally.record(testTarget, burstVerdict(attempt.frames, testTarget));
+      renderTestTally();
+    }
+  }
+}
+
 // ---------- master loop ----------
 let last = performance.now();
 function loop(now: number): void {
@@ -579,6 +872,8 @@ function loop(now: number): void {
   } else if (current === "game") {
     game.step(frame, now, dt);
     updateWordHighlight(frame);
+  } else if (current === "test") {
+    renderSoundTest(frame, dt);
   }
 
   if (dbgVisible && (current === "check" || current === "game")) renderDebug(frame);
@@ -622,6 +917,21 @@ if (window.speechSynthesis) {
 }
 
 requestAnimationFrame(loop);
+
+// Deep-link (#22): `?test=1` opens the detection-test screen directly. It needs a
+// running mic, so if one isn't up yet we request it (routing to the test screen on
+// grant, the shared denied screen on refusal) instead of the normal mic-check. It
+// composes with the other params — `?test=1&scene=vot&debug=1` all coexist, since
+// writeSceneParam only ever touches `scene` and this only READS `test`.
+const urlTest = new URLSearchParams(location.search).has("test");
+if (urlTest) {
+  if (audio.isRunning) {
+    showScreen("test");
+  } else {
+    onMicReady = () => showScreen("test");
+    beginMic();
+  }
+}
 
 // ---------- dev-only hook for visual testing without a live mic ----------
 if (import.meta.env.DEV) {
