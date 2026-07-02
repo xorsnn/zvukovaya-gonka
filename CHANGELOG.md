@@ -4,6 +4,36 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.10.0] - 2026-07-02
+
+**URL navigation for the two experiences** (issue #20). The active mode is now
+mirrored in the address bar as `?scene=<id>` (🐱 Догонялки → `?scene=kot`,
+🐰 Морковка → `?scene=vot`), so an experience is **linkable and reload-stable**:
+share `…/?scene=vot` and it opens straight into Морковка; reload mid-session and
+you keep the mode you picked. The default (chase / кот) stays a **clean URL** —
+a fresh visit writes nothing — so choosing nothing reproduces the pre-navigation
+flow byte-for-byte. Query param, not a path, because the build is served
+path-relative (`base: "./"`) from GitHub Pages / any subfolder / `file://`.
+
+### Added
+- `src/game/navigation.ts` — pure `resolveSceneParam(raw, pickable, defaultId)`
+  (DOM-free, unit-tested): resolves `?scene=` case-insensitively to a pickable
+  scene, dropping any unknown or non-pickable token back to the default. `dom`/`kit`
+  exist in `WORDS` but are not pickable, so they are not linkable.
+- `tests/navigation.test.ts` — 8 unit tests for the resolver (absent, empty,
+  valid id, case-insensitive, unknown, non-pickable word, always-pickable id).
+
+### Changed
+- `src/main.ts` — on load, `?scene=` preselects the matching picker card (unknown
+  token → default кот, and the bad token is stripped via `replaceState`, no
+  reload); tapping a card mirrors the pick to `?scene=<id>`. Existing `?debug` and
+  any `#hash` are preserved (`?debug=1&scene=vot`). No `scene` param = the v0.9.0
+  behavior exactly.
+
+### Notes
+- Back-button (`pushState`) history navigation between experiences is intentionally
+  out of scope here (this ships `replaceState` only); it can be a later increment.
+
 ## [0.9.0] - 2026-07-01
 
 The **two-phase «Т» win** (issue #18), the intended core experience, now shipped

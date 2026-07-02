@@ -225,6 +225,15 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   a new **mode** (`SceneType`) also needs a `GameView` render branch — see
   `CLAUDE.md`. `src/game/round.ts`'s `buildSceneMatcher` builds a round's matcher
   from the active scene's pattern (shared by `main.ts` and the picker test).
+- **`src/game/navigation.ts`** — URL deep-link for the two experiences (#20). The
+  active mode mirrors to `?scene=<id>` (🐱 `?scene=kot`, 🐰 `?scene=vot`), so a mode
+  is linkable and reload-stable. The pure `resolveSceneParam(raw, pickable,
+  defaultId)` (DOM-free, unit-tested) maps a raw `?scene=` value case-insensitively
+  to a pickable scene, dropping any unknown or non-pickable token (e.g. `dom`/`kit`,
+  which are words but not pickable) back to the default. The default is the
+  **absence** of the param, so a fresh visit is a clean URL and behaves exactly as
+  before. It is a query param (not a path) because the build is served path-relative
+  (`base: "./"`), so there is no server to rewrite a `/pull` route.
 - **`src/game/config.ts`** — the `PhoneticConfig` single source of truth (issue
   #4): per-rung flags (`rung1`/`rung2`/`rung3`), the `assist` continuum, a
   `debug` flag, and the read-only `showLetter` chip flag (#13), plus a tiny
@@ -234,7 +243,9 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   reads `assist` + `rung1` + `rung2` (with the per-child formant baseline) + `rung3`.
 - **`src/main.ts`** — screen flow (start → mic check → game), the **start-screen
   scene picker** (#16 — two cards; the chosen scene is set active before
-  mic-check), the single master render loop, mic-permission handling, the graceful
+  mic-check, and mirrored to `?scene=<id>` via `replaceState`, #20 — a deep-link
+  preselects the card on load, an unknown token is stripped, `?debug`/`#hash`
+  preserved), the single master render loop, mic-permission handling, the graceful
   denied/error fallback, the per-round matcher wiring (via `buildSceneMatcher`),
   the caregiver settings panel (per-rung toggles + assist + the read-only
   live-vowel chip toggle + debug, persisted live), the live-vowel chip render on
