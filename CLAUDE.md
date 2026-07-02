@@ -67,6 +67,16 @@ selection is all that's needed — the rest of the flow is scene-agnostic. Card
 labels (Догонялки / Морковка) are a picker-only UI concern and live in `main.ts`,
 not in the `WordScene` content model.
 
+**URL reflection (#20).** The active pickable scene is mirrored to `?scene=<id>`
+(a query param, since the build is served path-relative — `base: "./"` — so a path
+route would 404 on GitHub Pages). The pure `resolveSceneParam` (`src/game/navigation.ts`)
+maps a raw `?scene=` value to a pickable scene; `main.ts` preselects it on load and
+writes it on card-select via `replaceState`. **The default is the ABSENCE of the
+param** (a fresh visit is a clean URL), preserving the byte-for-byte pre-picker
+identity above — so an unknown or non-pickable token (e.g. `dom`/`kit`) resolves to
+the default AND is stripped from the URL. Only *pickable* scenes are linkable; a new
+pickable scene is deep-linkable for free (no per-scene URL code).
+
 ## Testing
 
 - `npm test` (vitest) runs in plain Node — **no jsdom, no mic**. Keep logic pure

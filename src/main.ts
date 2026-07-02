@@ -6,6 +6,7 @@ import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { LetterIndicator } from "./game/LetterIndicator";
 import { DEFAULT_WORD, PICKABLE_SCENES } from "./game/words";
 import { buildSceneMatcher } from "./game/round";
+import { resolveSceneParam, SCENE_PARAM } from "./game/navigation";
 import type { WordScene } from "./game/types";
 import { speakWord } from "./game/sfx";
 import { loadConfig, saveConfig, anyRungOn } from "./game/config";
@@ -138,6 +139,19 @@ function selectScene(scene: WordScene): void {
   syncWordCard();
 }
 
+/**
+ * Mirror the active experience into the URL's `?scene=` param (#20) — no reload,
+ * no history entry (`replaceState`). `param === null` removes it (the default is
+ * a clean URL). Any other params (e.g. `?debug`) and the `#hash` are preserved,
+ * so `?debug=1` becomes `?debug=1&scene=vot`.
+ */
+function writeSceneParam(param: string | null): void {
+  const url = new URL(location.href);
+  if (param === null) url.searchParams.delete(SCENE_PARAM);
+  else url.searchParams.set(SCENE_PARAM, param);
+  history.replaceState(history.state, "", url);
+}
+
 for (const scene of PICKABLE_SCENES) {
   const card = document.createElement("button");
   card.type = "button";
@@ -147,13 +161,25 @@ for (const scene of PICKABLE_SCENES) {
   card.innerHTML =
     `<span class="scene-emoji">${scene.chaser}${scene.fleer}</span>` +
     `<span class="scene-name">${SCENE_LABELS[scene.id] ?? scene.word}</span>`;
-  card.addEventListener("click", () => selectScene(scene));
+  card.addEventListener("click", () => {
+    selectScene(scene);
+    writeSceneParam(scene.id); // mirror the pick into ?scene= (#20)
+  });
   scenePicker.appendChild(card);
 }
 
-// Default = the game's initial scene (the first pickable = chase / кот), so
-// choosing nothing reproduces the pre-#16 flow byte-for-byte (AC#1).
-selectScene(game.getScene());
+// Deep-link (#20): the active experience is mirrored in `?scene=<id>`. On load,
+// resolve the param against PICKABLE_SCENES — a valid token preselects that card,
+// anything else (absent / unknown / bad case) falls back to the default кот. Then
+// canonicalize the URL so a bad or upper-cased token is cleaned without a reload.
+// The default stays a CLEAN URL (no param written on a fresh visit), so choosing
+// nothing reproduces the pre-#16/#20 flow byte-for-byte (AC#1).
+const rawScene = new URLSearchParams(location.search).get(SCENE_PARAM);
+const resolved = resolveSceneParam(rawScene, PICKABLE_SCENES, DEFAULT_WORD.id);
+selectScene(
+  PICKABLE_SCENES.find((s) => s.id === resolved.id) ?? game.getScene(),
+);
+if (resolved.param !== rawScene) writeSceneParam(resolved.param);
 
 // ---------- phonetic ladder config (issues #1, #4) ----------
 // `config` is the single source of truth for the whole phonetic layer: the
