@@ -77,6 +77,20 @@ identity above — so an unknown or non-pickable token (e.g. `dom`/`kit`) resolv
 the default AND is stripped from the URL. Only *pickable* scenes are linkable; a new
 pickable scene is deep-linkable for free (no per-scene URL code).
 
+## Detection-test screen (#22)
+
+A dev/caregiver-only tuning surface reached **only** via `?test=1` or the ⚙ panel's
+`[🎯 Тест звуков]` button — the matcher-independent way to *measure* detection
+quality (per-vowel bars, gated letter, consonant class, «т» burst + a target-practice
+hit-rate/confusion). Like the live chip (#13) it is **default-off and additive**, and
+**read-only** — it shares no state with the matcher and its inline calibrate stores a
+**screen-local** baseline (never `audio.setVowelBaseline()`). Pure segmentation +
+verdict + tally logic lives in `src/game/SoundTest.ts` (unit-tested, DOM-free); the
+screen/DOM wiring lives in `main.ts` (`renderSoundTest`, the sole new `loop()` call
+site). It forces the spectral + formant passes on while active and restores
+config-driven flags via `applyEngineFlags()` on leave. It **measures, never retunes** —
+threshold changes are the #11/#12 follow-ups, done live with the child.
+
 ## Testing
 
 - `npm test` (vitest) runs in plain Node — **no jsdom, no mic**. Keep logic pure

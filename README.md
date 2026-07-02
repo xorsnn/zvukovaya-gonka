@@ -209,6 +209,12 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   voiced, a score floor, and a runner-up margin) so the caregiver sees a steady
   letter, never a flicker. Pure and deterministic; feeds nothing back into
   grading (the read-only invariant).
+- **`src/game/SoundTest.ts`** — pure scoring logic for the detection-test screen
+  (#22): a `BurstAccumulator` (segments the frame stream into one attempt per
+  voiced burst + a validity filter), `burstVerdict(frames, target)` (the modal
+  gated-core rule for a vowel / the `stopBurst`-in-window rule for Т), and a
+  `ScoreTally` (hits + confusion). DOM-free and deterministic — no `Date.now()` /
+  `Math.random()` — so the whole verdict + tally is unit-tested in plain Node.
 - **`src/game/sfx.ts`** — synthesized celebration sounds + best-effort Russian
   TTS to model the target word. Sound only plays _after_ the pounce, never
   during the chase (with echo cancellation off, speaker audio would otherwise
@@ -250,7 +256,11 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   the caregiver settings panel (per-rung toggles + assist + the read-only
   live-vowel chip toggle + debug, persisted live), the live-vowel chip render on
   the check/game screens, and the vowel-baseline calibration sampled on the
-  mic-check screen.
+  mic-check screen. It also hosts the **detection-test screen** (#22, reached via
+  `?test=1` or the ⚙ **[🎯 Тест звуков]** button): the screen markup + nav, the
+  transient engine-flag force on enter / restore on leave, the screen-local
+  detectors, and `renderSoundTest` (the sole new `loop()` call site, so play's
+  hot path is untouched).
 
 ## Caregiver affordances
 
@@ -269,14 +279,36 @@ reload. The **показывать букву** chip is a caregiver/dev display 
 the most-likely vowel live (great for a "yes — that was an «О»!" or for
 validating the detector on a real mic) but never changes how the chase grades.
 
+### Detection-test screen (dev/caregiver, #22)
+
+A dedicated tuning surface, reached **only** via `?test=1` or the ⚙ panel's
+**[🎯 Тест звуков]** button (same gating as «отладка»). Where the game and the
+`?debug` overlay only hint at detection quality, this screen **measures** it —
+and it never touches gameplay, the matcher, or the shipped config (default-off
+and additive, so the AC#1/AC#5 identities still hold). It has two parts:
+
+- **Live readout** — per-vowel а/о/у/и bars + the smoothed, gated letter (a
+  screen-local `LetterIndicator`), F1/F2 in Hz, vowelLikeness / ZCR / centroid /
+  lowBand bars, the coarse consonant class, and a STOP-BURST flash with "last
+  burst N мс назад". A first **🎤 Подержи «ААА»** calibrates a **screen-local**
+  vowel baseline (the game's session baseline is left untouched); before that the
+  letter reads «—» with a "нужна калибровка" hint while everything else still runs.
+- **Target practice** — pick а/о/у/и/Т; each valid voiced burst is scored by
+  exactly what the game/chip act on, and a live **hit rate + confusion breakdown**
+  tells you how often the detector reads what the child meant. «—» is a real
+  outcome. Use it to answer "does her «т» actually fire?" before touching a
+  threshold; the actual retuning is the #11/#12 follow-up (still done on a real
+  mic, with the child — not by unit tests alone).
+
 ## Tests
 
 ```bash
 npm test           # vitest: pure DSP (incl. the `detectStopBurst` shape test),
                    # the PatternMatcher state machine, the GameView tug-of-war
                    # drive, an AudioEngine→matcher integration via an injected
-                   # analyser, plus the AC#1 (easy = byte-for-byte) and AC#5
-                   # (kill-switch identity) guards
+                   # analyser, the SoundTest burst/verdict/tally logic (#22),
+                   # plus the AC#1 (easy = byte-for-byte) and AC#5 (kill-switch
+                   # identity) guards
 ```
 
 The DSP and the state machine are pure, and `AudioEngine` accepts an injected
@@ -326,7 +358,11 @@ armed-«Т» guard) in `PatternMatcher.ts`. The **«т» stop-burst thresholds, 
 were chosen to make the mechanic demonstrable in tests and **must be set on a real
 microphone with the child** (turn on `?debug=1`: it shows the live `stopBurst`, the
 `⚑ARMED waiting-«Т»` checkpoint state, and the target letter — and the **`k`** key
-latches the checkpoint so you can drill the armed «Т» against real pauses). If the
+latches the checkpoint so you can drill the armed «Т» against real pauses). For a
+direct, honest reading of detection quality before you touch any of these — "does
+her «т» actually fire? does А read as А?" — open the **detection-test screen**
+(`?test=1` or ⚙ **[🎯 Тест звуков]**): its target-practice hit rate + confusion is
+the measurement tool this tuning is meant to move. If the
 spectral layer ever misbehaves on real hardware, flip the offending rung off in
 the ⚙ settings panel (or turn every rung off) to revert to the shipped
 loudness-only engine instantly, mid-session — no reload, no rebuild. The mechanic
