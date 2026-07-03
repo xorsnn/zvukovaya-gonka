@@ -4,6 +4,74 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.12.0] - 2026-07-03
+
+**Offline detection fixtures** (issue #24) — the *foundation* for reproducible
+acoustic tuning. Every threshold in `PhoneticFeatures.ts` is a placeholder "tuned
+blind, live with the child"; that made tuning non-reproducible (a different
+room/mic/mood each session) and lossy (nothing was captured, so a regression
+couldn't be caught by CI). This increment closes the loop: **capture** a few
+seconds of the child's real frames on the #22 test screen, **replay** them offline
+through the exact pure detector stack, and **lock** a good read as a green test.
+
+Because every detector is already a pure function over `Float32Array`, the replay
+runs the *real* `AudioEngine` against a fake `AnalyserNode` that plays the captured
+buffers back — so every stateful path (adaptive noise floor, self-scaling `level`,
+the fast «т» envelope, voiced hysteresis) is reproduced exactly, not
+re-implemented. The scorer reuses the screen's own `LetterIndicator` +
+`BurstAccumulator` + `burstVerdict`, so an offline verdict is the verdict the child
+saw. **Still inside the core rule:** a clip carries only a COARSE label (a `kot`
+clip, a `hiss` clip) — a class the tuner already knows they produced, never a
+transcript — used to score whether the EXISTING feature detectors read it right. No
+model is trained; no phoneme is decoded. It measures; it changes no threshold.
+
+Fully **additive and default-off**: the capture control lives only on the
+`?test=1`/⚙ detection-test screen, is local-only (a JSON download, no upload, no
+telemetry), and touches neither the game path, the matcher, nor the shipped config.
+
+### Added
+- `src/game/DetectionFixture.ts` — the pure, DOM-free harness: the `DetectionClip`
+  schema + `serializeClip`/`parseClip`/`validateClip`; a `ClipAnalyser`
+  (`SpectralAnalyserLike` that plays a clip back into the engine); `replayClip`
+  (runs a clip through the real `AudioEngine`); `clipVerdict`/`ClipOutcome` (the
+  robust coarse read: silence / vowel / hiss / stop); `scoreClip` (the full
+  on-screen scoring pipeline for a target); and `sweepAssist` (grids the shipped
+  строго↔легче assist — the already-parameterised «т» tunable — and reports hit
+  rate + «т» false-alarm rate per setting).
+- `tests/fixtures/*.json` — one committed clip per coarse class (silence, four
+  bare vowels, hiss, кот). These are **synthetic seeds** today (no mic at authoring
+  time); real captures downloaded from the test screen drop into the same folder
+  and are scored identically. `scripts/gen-detection-fixtures.mjs` regenerates them
+  deterministically (LCG, no `Math.random`).
+- `tests/DetectionFixture.test.ts` (19) — loader round-trip + validation; the
+  `ClipAnalyser` playback; **replay parity** (a clip through `ClipAnalyser` matches
+  a live `FakeAnalyser` run frame-for-frame, and a replayed `vowelLikeness` equals
+  a direct pure-function call); the `clipVerdict` outcome rules.
+- `tests/detection-fixtures.test.ts` (17) — the **regression lock**: each committed
+  clip's replayed coarse outcome must match its label; кот fires a stop-burst and
+  scores «Т»; no non-stop clip fires a false «т». Prints the bare-vowel confusion +
+  the assist sweep for a tuner to read.
+- `AudioEngine.captureRawFrame()` + `getSampleRate()`/`getFrameSize()`/
+  `getBinCount()` — additive, read-only accessors off the play hot path that
+  snapshot the current frame's raw time buffer + dB spectrum for the capture path.
+
+### Changed
+- `src/main.ts` — the detection-test screen gains a **«запись»** control: pick a
+  coarse label, record (auto-stops at 8 s), and download the clip as JSON. Recording
+  is cancelled on screen leave; the status line shows elapsed/frame count; the
+  captured clip embeds the active assist + the screen-local baseline so it replays
+  faithfully.
+- `src/style.css` — styles for the record row (label select, record toggle, status).
+
+### Notes
+- Delivers the *ability* to sweep, not any threshold change (that rides #11 and the
+  pitch/HNR, spectral-«т»-burst, and LPC-formant follow-ups — each now validatable
+  against real audio via this harness). Vowel *identity* is deliberately reported,
+  not asserted: coarse formant reads are rough (bare-о/у confuse on the synthetic
+  seeds), and surfacing that offline is exactly the point.
+- The AC#1/AC#5 identity guardrails (kill-switch + `strictness = 0` loudness path)
+  stay green — this adds a harness and changes no detector.
+
 ## [0.11.0] - 2026-07-02
 
 **Detection-test screen** (issue #22) — a dev/caregiver-only surface for tuning
