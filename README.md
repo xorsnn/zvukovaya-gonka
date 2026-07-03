@@ -13,6 +13,15 @@ it pops free on «…Т» (= «вот!»). Both are the *same* acoustic word (ho
 then «т»): the pull reuses кот's exact pattern, physics, strictness slider, and
 celebration — only the picture differs. See `CLAUDE.md` for the scene/mode model.
 
+**A third, no-goal option (#30):** 🦖 **Динозавр** — a reactive toy for a
+*pre-verbal / babbling* child, where the goal is stripped away entirely. She makes
+*any* sound, and when she pauses a dinosaur **roars back**. It's the simplest
+possible cause-and-effect loop (*"I made a noise → something big happened"*) to
+pull her into vocalizing at all, and into **turn-taking**. It reads only the
+loudness envelope — no word, no «Т», no matcher — so it's not a "mode" in the
+кот/вот sense but a standalone screen (like the detection-test screen). See
+[the dino toy](#reactive-dino-toy-30) below.
+
 UI and content are in Russian.
 
 ## The core rule: no word recognition, but phonetic-feature sensing
@@ -220,10 +229,22 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   back into the real `AudioEngine`, `replayClip` / `clipVerdict` (the coarse
   outcome), `scoreClip` (the full on-screen scoring pipeline), and `sweepAssist`.
   Pure and DOM-free, so a committed clip is a Node regression test.
-- **`src/game/sfx.ts`** — synthesized celebration sounds + best-effort Russian
-  TTS to model the target word. Sound only plays _after_ the pounce, never
-  during the chase (with echo cancellation off, speaker audio would otherwise
-  feed back into the chase).
+- **`src/game/RoarToy.ts`** — the pure state machine for the dino toy (#30):
+  `stepRoar(state, level, dt, assist, cfg)` fires exactly one roar per voice→pause
+  cycle (`level ≥ threshold` for `≥ minVoiceMs`, then quiet for `≥ pauseMs`), with
+  a lockout that ignores input for the roar's length, an assist-scaled threshold,
+  and an `intensity` that tracks the utterance's peak. DOM-free, no `Date.now()` /
+  `Math.random()` — unit-tested in plain Node like `SoundTest.ts`.
+- **`src/game/RoarView.ts`** — the dino toy's canvas: a 🦖 that grows/leans with
+  her live loudness, then pops open + shakes + bursts particles + flashes «Р-Р-Р!»
+  on a roar. Emoji + motion only, no new art; the decision logic lives in the pure
+  `RoarToy`, so the view only smooths + paints (needs a real canvas, like
+  `MeterView`).
+- **`src/game/sfx.ts`** — synthesized celebration sounds, the procedural dino
+  `playRoar(intensity)` + the exported `ROAR_TOTAL_MS` lockout budget (#30), and
+  best-effort Russian TTS to model the target word. Sound only plays _after_ we
+  stop listening — the pounce, or the dino's pause — never while listening (with
+  echo cancellation off, speaker audio would otherwise feed back into detection).
 - **`src/game/words.ts` / `types.ts`** — the content model. A `WordScene` is the
   unit of content and now carries an `AcousticPattern` (which ladder rung, how
   long to hold, the required stop gap, an optional target `vowel` for Rung 2, an
@@ -265,7 +286,10 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   `?test=1` or the ⚙ **[🎯 Тест звуков]** button): the screen markup + nav, the
   transient engine-flag force on enter / restore on leave, the screen-local
   detectors, and `renderSoundTest` (the sole new `loop()` call site, so play's
-  hot path is untouched).
+  hot path is untouched). And the **dino toy** (#30, a 🦖 start-screen card or
+  `?dino=1`): the `dino` screen markup + nav, the compact assist slider, and
+  `renderDino` (the 2nd additive `loop()` branch — feeds `level` to `stepRoar`,
+  plays `playRoar` when it fires, and paints `RoarView`).
 
 ## Caregiver affordances
 
@@ -335,6 +359,39 @@ the «т» bounds via `burstOptsForAssist`) and reports the hit rate + «т» fa
 rate per setting — the reproducible measurement for the #11 / pitch-HNR /
 spectral-«т» / LPC-formant follow-ups. This increment delivers the *ability* to
 sweep; it changes no threshold (those are still tuned live, with the child).
+
+## Reactive dino toy (#30)
+
+A **no-goal, no-fail** toy for a **pre-verbal / babbling** child, reached from the
+🦖 **Динозавр** start-screen card (or the `?dino=1` deep-link). Догонялки/Морковка
+ask her to sustain a vowel and land a «Т» — the right challenge once she's
+producing those sounds, but a lot to ask of a child who isn't yet. The dino strips
+the goal away: she makes *any* sound, and when she pauses a 🦖 **roars back**. The
+therapeutic point is the simplest cause-and-effect loop — *"I made a noise →
+something big happened"* — to pull her into **vocalizing at all**, and into
+**turn-taking** (she sounds, the dino answers, she sounds again). Success is her
+repeating a sound on her own to make it roar again.
+
+It is the **cheapest feature in the codebase** and stays fully inside the core
+rule: it reads only `AudioFrame.level` — no word/phoneme decoding, no ML, no
+matcher, no «Т». Because echo cancellation is off (so the mic hears quiet breaths),
+any speaker audio feeds back into detection — so the roar fires **on her pause, not
+live**, and input is **locked out** for the roar's full length (`ROAR_TOTAL_MS`) so
+the roar's own audio can never be mistaken for her voice.
+
+- **The decision logic is pure** (`src/game/RoarToy.ts`, `stepRoar`): while she's
+  above the (assist-scaled) threshold the dino grows live; a voicing of `≥
+  minVoiceMs` followed by a `≥ pauseMs` pause fires **exactly one** roar. Pure
+  silence never fires; a cough shorter than `minVoiceMs` never fires; a louder
+  sound makes a bigger roar (`intensity` = the utterance's peak).
+- **The строго↔легче slider** (the same `config.assist`, mirrored on a compact
+  in-screen slider) lowers the effective trigger toward легче, so a fainter babble
+  still roars — biased low by default for a pre-verbal child.
+- Why it's **not a "mode"** like кот/вот: a mode reuses `PatternMatcher` +
+  `stepPlay` + `strictnessFor` with a new render branch. The dino uses none of
+  that. It matches the **detection-test screen** shape instead — a standalone
+  `Screen`, its own `loop()` branch, and a pure DOM-free logic module. Everything
+  is additive: the `check`/`game` path and the matcher are untouched.
 
 ## Tests
 

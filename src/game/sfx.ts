@@ -60,6 +60,77 @@ export function playCelebration(): void {
   tone(c, 2093, t + 0.5, 0.45, 0.08, "sine");
 }
 
+/**
+ * The roar's full audible length plus a short tail (ms). Exported as the single
+ * source of truth for the reactive dino toy's input lockout (issue #30): the
+ * pure {@link RoarToy} uses this as `RoarToyCfg.lockoutMs`, so input is ignored
+ * for at least as long as the roar sounds over the speakers. `intensity` only
+ * scales the roar's gain + body length WITHIN this budget — it must never make
+ * the roar outlast this window (see {@link playRoar}).
+ */
+export const ROAR_TOTAL_MS = 1200;
+
+/**
+ * A dinosaur roar (issue #30) — procedural, asset-free, offline. A low ~95 Hz
+ * sawtooth growl with a downward pitch sweep, layered over a lowpass-filtered
+ * noise buffer for the raspy breath, under a fast-attack / decay gain envelope.
+ *
+ * `intensity` (0..1, the utterance's peak loudness) scales the gain and the body
+ * length so a louder sound gets a bigger roar — but the body is capped well under
+ * {@link ROAR_TOTAL_MS} so the audible roar always finishes inside the toy's
+ * input lockout. Like every SFX here it plays only AFTER we stop listening (the
+ * toy locks out input for the roar's duration), so it never feeds the mic.
+ */
+export function playRoar(intensity = 1): void {
+  const c = getCtx();
+  if (!c) return;
+  const t = c.currentTime;
+  const amt = Math.max(0, Math.min(1, intensity));
+  // Body 0.6..1.0 s and peak gain 0.30..0.5 grow with intensity; body + tail stay
+  // under ROAR_TOTAL_MS (1.2 s) so the roar never outlasts the lockout.
+  const body = 0.6 + 0.4 * amt;
+  const peak = 0.3 + 0.2 * amt;
+
+  // 1) Growl: a low sawtooth sweeping down, kept dark by a closing lowpass.
+  const osc = c.createOscillator();
+  const og = c.createGain();
+  const lp = c.createBiquadFilter();
+  osc.type = "sawtooth";
+  osc.frequency.setValueAtTime(95, t);
+  osc.frequency.exponentialRampToValueAtTime(50, t + body);
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(280, t + body);
+  og.gain.setValueAtTime(0.0001, t);
+  og.gain.exponentialRampToValueAtTime(peak, t + 0.05);
+  og.gain.exponentialRampToValueAtTime(0.0001, t + body);
+  osc.connect(og);
+  og.connect(lp);
+  lp.connect(c.destination);
+  osc.start(t);
+  osc.stop(t + body + 0.05);
+
+  // 2) Breath: a short lowpass-filtered noise burst for the raspy texture.
+  const dur = body + 0.1;
+  const buf = c.createBuffer(1, Math.max(1, Math.ceil(c.sampleRate * dur)), c.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = c.createBufferSource();
+  const nf = c.createBiquadFilter();
+  const ng = c.createGain();
+  noise.buffer = buf;
+  nf.type = "lowpass";
+  nf.frequency.value = 1100;
+  ng.gain.setValueAtTime(0.0001, t);
+  ng.gain.exponentialRampToValueAtTime(peak * 0.6, t + 0.06);
+  ng.gain.exponentialRampToValueAtTime(0.0001, t + body);
+  noise.connect(nf);
+  nf.connect(ng);
+  ng.connect(c.destination);
+  noise.start(t);
+  noise.stop(t + dur);
+}
+
 /** Soft "pop" for the pounce moment itself. */
 export function playPop(): void {
   const c = getCtx();
