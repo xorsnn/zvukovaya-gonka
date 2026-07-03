@@ -1,6 +1,14 @@
 import "./style.css";
 import { AudioEngine, type AudioFrame } from "./audio/AudioEngine";
 import { MeterView } from "./game/MeterView";
+import { RoarView } from "./game/RoarView";
+import {
+  initRoar,
+  stepRoar,
+  DEFAULT_ROAR_CFG,
+  type RoarStateT,
+  type RoarToyCfg,
+} from "./game/RoarToy";
 import { GameView, MIN_FLOOR, MOUSE_FLEE_RATE } from "./game/GameView";
 import { PatternMatcher, MIN_HOLD_THRESHOLD } from "./game/PatternMatcher";
 import { LetterIndicator } from "./game/LetterIndicator";
@@ -31,17 +39,23 @@ import { DEFAULT_WORD, PICKABLE_SCENES } from "./game/words";
 import { buildSceneMatcher } from "./game/round";
 import { resolveSceneParam, SCENE_PARAM } from "./game/navigation";
 import type { WordScene } from "./game/types";
-import { speakWord } from "./game/sfx";
+import { speakWord, playRoar, ROAR_TOTAL_MS } from "./game/sfx";
 import { loadConfig, saveConfig, anyRungOn } from "./game/config";
 
 // The detection-test screen (#22) is a dev/caregiver-only tuning surface, reached
 // only via `?test=1` or the ⚙ panel's [Тест звуков] button. It never touches
 // gameplay, the matcher, or the shipped config.
-type Screen = "start" | "check" | "denied" | "game" | "test";
+//
+// The dino toy (#30) is a no-goal, no-fail reactive screen: the child makes any
+// sound and a 🦖 roars back on her pause. Like `test`, it is a standalone Screen
+// with its own loop() branch and a pure DOM-free logic module (RoarToy). It uses
+// NONE of the matcher / stepPlay / strictness stack — it reads only `level`.
+type Screen = "start" | "check" | "denied" | "game" | "test" | "dino";
 
 const app = document.getElementById("app")!;
 const audio = new AudioEngine();
 const meter = new MeterView();
+const dino = new RoarView();
 const game = new GameView(DEFAULT_WORD);
 // Read-only live-vowel chip smoother (#13); only consulted when config.showLetter.
 const letterIndicator = new LetterIndicator();
@@ -141,12 +155,24 @@ app.innerHTML = `
       </div>
     </div>
   </section>
+
+  <section class="screen dino" data-screen="dino">
+    <button class="parent-link dino-back" id="dinoBackBtn" aria-label="Назад">← назад</button>
+    <p class="dino-hint">Скажи что-нибудь — динозаврик зарычит! 🦖</p>
+    <label class="assist-control dino-assist" id="dinoAssistControl">
+      <span class="assist-cap">строго</span>
+      <input type="range" id="dinoAssistSlider" min="0" max="1" step="0.1" value="0.5" aria-label="Чувствительность" />
+      <span class="assist-cap">легче</span>
+    </label>
+  </section>
 `;
 
 // mount canvases
 document.getElementById("meterWrap")!.appendChild(meter.canvas);
 const gameScreen = el<HTMLElement>('[data-screen="game"]');
 gameScreen.insertBefore(game.canvas, gameScreen.firstChild);
+const dinoScreen = el<HTMLElement>('[data-screen="dino"]');
+dinoScreen.insertBefore(dino.canvas, dinoScreen.firstChild);
 
 // ---------- element refs ----------
 const startBtn = el<HTMLButtonElement>("#startBtn");
@@ -187,6 +213,9 @@ const testConfusion = el<HTMLElement>("#testConfusion");
 const testClipLabel = el<HTMLSelectElement>("#testClipLabel");
 const testRecordBtn = el<HTMLButtonElement>("#testRecordBtn");
 const testRecordStatus = el<HTMLElement>("#testRecordStatus");
+// dino toy refs (#30)
+const dinoBackBtn = el<HTMLButtonElement>("#dinoBackBtn");
+const dinoAssistSlider = el<HTMLInputElement>("#dinoAssistSlider");
 for (const label of COARSE_LABELS) {
   const opt = document.createElement("option");
   opt.value = label;
@@ -268,6 +297,25 @@ for (const scene of PICKABLE_SCENES) {
   });
   scenePicker.appendChild(card);
 }
+
+// The 🦖 Динозавр card (#30) sits next to the pickable scenes but is NOT a
+// WordScene — it launches the no-goal reactive toy, not a matcher round. So it is
+// a plain button (role="button", not part of the radiogroup), and clicking it
+// goes straight to mic-check with the dino as the pending destination (below),
+// bypassing the «Начать ▶» button the scene cards wait on.
+const dinoCard = document.createElement("button");
+dinoCard.type = "button";
+dinoCard.className = "scene-card dino-card";
+dinoCard.setAttribute("role", "button");
+dinoCard.innerHTML =
+  `<span class="scene-emoji">🦖</span>` +
+  `<span class="scene-name">Динозавр</span>`;
+dinoCard.addEventListener("click", () => {
+  pendingPlay = "dino";
+  onMicReady = () => showScreen("check");
+  beginMic();
+});
+scenePicker.appendChild(dinoCard);
 
 // Deep-link (#20): the active experience is mirrored in `?scene=<id>`. On load,
 // resolve the param against PICKABLE_SCENES — a valid token preselects that card,
@@ -383,6 +431,7 @@ rung1Toggle.checked = config.rung1;
 rung2Toggle.checked = config.rung2;
 rung3Toggle.checked = config.rung3;
 assistSlider.value = String(config.assist);
+dinoAssistSlider.value = String(config.assist); // the dino toy mirrors the same dial (#30)
 debugToggle.checked = config.debug;
 letterToggle.checked = config.showLetter;
 
@@ -417,12 +466,20 @@ letterToggle.addEventListener("change", () => {
   saveConfig(config);
 });
 
-assistSlider.addEventListener("input", () => {
-  config.assist = parseFloat(assistSlider.value);
+// The строго↔легче dial has two mirrored sliders (the ⚙ panel's, and the dino
+// toy's #30). Both write the same `config.assist`, so route them through one
+// setter that updates the matcher, the «т» detector, persists, and keeps both
+// slider positions in sync. Behaviour for the ⚙ slider is unchanged (AC#10).
+function applyAssist(v: number): void {
+  config.assist = v;
+  assistSlider.value = String(v);
+  dinoAssistSlider.value = String(v);
   matcher?.setAssist(config.assist);
   audio.setAssist(config.assist); // keep the «т» detector on the same dial (#18)
   saveConfig(config);
-});
+}
+
+assistSlider.addEventListener("input", () => applyAssist(parseFloat(assistSlider.value)));
 
 debugToggle.addEventListener("change", () => {
   config.debug = debugToggle.checked;
@@ -447,6 +504,13 @@ function showScreen(name: Screen): void {
       game.resize();
       startRound();
     });
+  }
+  // Entering the dino toy (#30): reset the pure state + the view, then size the
+  // canvas. No matcher, no calibration — it reads only `level`.
+  if (name === "dino") {
+    roarState = initRoar();
+    dino.reset();
+    requestAnimationFrame(() => dino.resize());
   }
   // Entering/leaving the detection-test screen (#22): it forces the spectral +
   // formant passes ON (so every detector has data even under the default config),
@@ -493,7 +557,13 @@ game.onCatch = () => {
 // shared retry button honours whatever destination is pending.
 let onMicReady: () => void = () => showScreen("check");
 
+// Where the mic-check's «Играть!» leads: the normal game round, or the dino toy
+// (#30). The 🦖 card sets this to "dino" before mic-check; every other entry
+// (Начать / scene cards) leaves it at the default "game" (AC#1, AC#10).
+let pendingPlay: "game" | "dino" = "game";
+
 startBtn.addEventListener("click", () => {
+  pendingPlay = "game";
   onMicReady = () => showScreen("check");
   beginMic();
 });
@@ -524,6 +594,12 @@ async function beginMic(): Promise<void> {
 }
 
 playBtn.addEventListener("click", () => {
+  // The dino toy (#30) reads only `level` — no vowel baseline needed, so skip
+  // finalizeCalibration and land straight on the reactive screen (AC#1).
+  if (pendingPlay === "dino") {
+    showScreen("dino");
+    return;
+  }
   // Lock in her vowel baseline from the mic-check before the chase begins.
   finalizeCalibration();
   showScreen("game");
@@ -545,6 +621,14 @@ testOpenBtn.addEventListener("click", () => {
   showScreen("test");
 });
 testBackBtn.addEventListener("click", () => showScreen("start"));
+
+// dino toy nav (#30): «← назад» returns to start; the toy's own compact slider
+// mirrors the shared строго↔легче dial.
+dinoBackBtn.addEventListener("click", () => showScreen("start"));
+dinoAssistSlider.addEventListener("input", () =>
+  applyAssist(parseFloat(dinoAssistSlider.value)),
+);
+
 testCalibBtn.addEventListener("click", () => startTestCalibration());
 testNextTargetBtn.addEventListener("click", () => cycleTestTarget());
 testResetBtn.addEventListener("click", () => {
@@ -977,6 +1061,25 @@ function captureTestFrame(dtMs: number): void {
   if (testRecordMs >= TEST_RECORD_MAX_MS) finishTestRecording();
 }
 
+// ---------- dino toy (issue #30) ----------
+// A no-goal, no-fail reactive screen: the child makes any sound, and on her pause
+// a 🦖 roars back. All the decision logic is the pure `stepRoar`; here we only
+// feed it the live `level` + dt + the shared assist dial, play the roar when it
+// fires, and paint the view. The lockout inside `stepRoar` suppresses input for
+// the roar's full length, so the roar's own audio over the (echo-cancellation-off)
+// speakers can never start a new voicing or a second roar (AC#5, AC#9).
+const roarCfg: RoarToyCfg = { ...DEFAULT_ROAR_CFG, lockoutMs: ROAR_TOTAL_MS };
+let roarState: RoarStateT = initRoar();
+
+/** The dino screen's per-frame work — the 2nd new loop() call site after
+ * renderSoundTest, so play's hot path is untouched (AC#10). */
+function renderDino(frame: AudioFrame, dtMs: number): void {
+  const res = stepRoar(roarState, frame.level, dtMs, config.assist, roarCfg);
+  roarState = res.state;
+  if (res.roar) playRoar(res.intensity); // fires only in the pause, then locks out
+  dino.draw(roarState, frame.level, res.roar, dtMs);
+}
+
 // ---------- master loop ----------
 let last = performance.now();
 function loop(now: number): void {
@@ -1011,6 +1114,8 @@ function loop(now: number): void {
     updateWordHighlight(frame);
   } else if (current === "test") {
     renderSoundTest(frame, dt);
+  } else if (current === "dino") {
+    renderDino(frame, dt);
   }
 
   if (dbgVisible && (current === "check" || current === "game")) renderDebug(frame);
@@ -1037,6 +1142,7 @@ function updateWordHighlight(frame: { voiced: boolean }): void {
 function onResize(): void {
   if (current === "check") meter.resize();
   if (current === "game") game.resize();
+  if (current === "dino") dino.resize();
 }
 window.addEventListener("resize", onResize);
 window.addEventListener("orientationchange", () =>
@@ -1066,6 +1172,20 @@ if (urlTest) {
     showScreen("test");
   } else {
     onMicReady = () => showScreen("test");
+    beginMic();
+  }
+}
+
+// Deep-link (#30): `?dino=1` opens the reactive dino toy directly (mirrors the
+// `?test` handling above). `test` wins if both are present. Like `?test` it only
+// READS its param, so it composes with `?scene`/`?debug`.
+const urlDino = new URLSearchParams(location.search).has("dino");
+if (urlDino && !urlTest) {
+  pendingPlay = "dino";
+  if (audio.isRunning) {
+    showScreen("dino");
+  } else {
+    onMicReady = () => showScreen("dino");
     beginMic();
   }
 }

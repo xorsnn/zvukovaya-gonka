@@ -667,3 +667,53 @@ body {
   font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
   color: rgba(255, 255, 255, 0.5);
 }
+
+/* reactive dino toy (issue #30): a full-screen canvas with a floating back
+   button, a friendly hint, and a compact caregiver assist slider. */
+.dino {
+  display: none;
+  padding: 0;
+  background: radial-gradient(circle at 50% 30%, #ffe7c2 0%, #ffcf8f 55%, #ffb865 100%);
+}
+.dino.active {
+  display: block;
+}
+.dino-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.dino-back {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  z-index: 2;
+}
+.dino-hint {
+  position: absolute;
+  top: clamp(14px, 4vh, 34px);
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: 88vw;
+  font-size: clamp(15px, 3.4vw, 22px);
+  font-weight: 800;
+  color: #7a3d00;
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  z-index: 1;
+}
+.dino-assist {
+  position: absolute;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+}
+
+/* the 🦖 launch card gently bobs so it reads as alive without being "selected". */
+.dino-card .scene-emoji {
+  animation: chase-bob 1.1s ease-in-out infinite alternate;
+}

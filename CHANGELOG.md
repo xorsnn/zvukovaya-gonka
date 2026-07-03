@@ -4,6 +4,42 @@ All notable changes to Гонка звуков are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [0.13.0] - 2026-07-03
+
+**Reactive dinosaur roar toy** (issue #30) — a new no-goal, no-fail mode for a
+**pre-verbal / babbling** child. The two existing modes (🐱 Догонялки / 🐰
+Морковка) ask a child to sustain a vowel and land a «Т» stop — the right
+challenge once she's producing those sounds, but a lot of pressure earlier. The
+dino toy strips the goal away: she makes *any* sound, and when she pauses a 🦖
+**roars back**. The therapeutic point is the simplest cause-and-effect loop —
+*"I made a noise → something big happened"* — to pull her into **vocalizing at
+all**, and into **turn-taking** (she sounds, the dino answers, she sounds again).
+
+It is the **cheapest feature in the codebase** and sits fully inside the core
+rule: it reads ONLY the loudness envelope (`AudioFrame.level`) — no word/phoneme
+decoding, no ML, no matcher. Turn-taking (roar on the pause) rather than a live
+roar is deliberate: echo cancellation is off so the mic can hear quiet breaths,
+so the roar plays only while she's silent, and input is **locked out** for the
+roar's full length so its own audio can never be mistaken for her voice.
+
+- **Pure state machine** `src/game/RoarToy.ts` (`stepRoar`) — DOM-free and
+  unit-tested like `SoundTest.ts`: `level ≥ threshold` for `≥ minVoiceMs` then a
+  `≥ pauseMs` pause fires exactly one roar; a sub-`minVoiceMs` blip and pure
+  silence never fire; the roar's `intensity` tracks the utterance's peak loudness.
+- **Assist dial** — the same строго↔легче slider lowers the effective trigger, so
+  toward легче a fainter babble still roars (biased low for a pre-verbal child).
+- **Procedural roar** `playRoar()` in `sfx.ts` — an asset-free low sawtooth growl
+  + filtered-noise breath, `intensity`-scaled within the exported `ROAR_TOTAL_MS`
+  lockout budget.
+- **Reached** from a new 🦖 Динозавр start-screen card, or the `?dino=1` deep-link.
+
+Fully **additive**: a new `Screen`, a new `loop()` branch, a new card, and new
+files. The `check`/`game` branches, `PatternMatcher`, `stepPlay`, and
+`strictnessFor` are untouched — the all-rungs-off kill-switch identity still holds
+byte-for-byte, because the dino screen never calls the matcher or `stepPlay`.
+
+Tests 210 → 227.
+
 ## [0.12.0] - 2026-07-03
 
 **Offline detection fixtures** (issue #24) — the *foundation* for reproducible

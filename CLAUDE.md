@@ -120,6 +120,34 @@ the EXISTING detectors, trains nothing).
   changes. This issue delivers the ability to sweep; the actual retune rides #11 and the
   feature follow-ups, still done live with the child using this harness.
 
+## Reactive dino toy (#30) — a no-goal screen, NOT a mode
+
+A no-fail toy for a **pre-verbal** child: she makes any sound, and on her pause a 🦖
+roars back (cause-and-effect + turn-taking, the pull into vocalizing at all). It reads
+**only** `AudioFrame.level` — no word, no «Т», no matcher, no `stepPlay`/`strictnessFor` —
+so it is the **cheapest** feature and squarely inside the core rule.
+
+- **It is NOT a `SceneType` mode.** A mode (кот/вот) reuses `PatternMatcher` + `stepPlay` +
+  `strictnessFor` with a new render branch; the dino uses none of that, so forcing it into
+  the `WordScene`/matcher model would be wrong. It follows the **detection-test screen**
+  shape instead: a standalone `Screen` value, its own `loop()` branch, and a **pure,
+  DOM-free logic module**. When a future feature reads only the envelope with no word goal,
+  copy THIS shape, not the mode shape.
+- **Pure logic in `src/game/RoarToy.ts`** (`stepRoar`, unit-tested like `SoundTest.ts`): a
+  voicing `≥ minVoiceMs` then a pause `≥ pauseMs` fires **exactly one** roar; pure silence
+  and a sub-`minVoiceMs` blip never fire; `intensity` = the utterance's peak. The view
+  (`RoarView.ts`, needs a canvas) only smooths + paints — keep decisions in the pure module.
+- **Roar on the PAUSE, never live, + a lockout.** Echo cancellation is off, so any speaker
+  audio feeds the mic — the roar must play only while she's silent, and input is ignored for
+  the roar's whole length. The single source of truth for that length is `ROAR_TOTAL_MS`
+  (exported from `sfx.ts`), wired into `RoarToyCfg.lockoutMs`; `playRoar`'s `intensity` only
+  scales gain/body WITHIN that budget, never past it. Do not reintroduce a live roar.
+- **Additive + assist-scaled, like everything else.** New `Screen`, new `loop()` branch, a
+  hand-built 🦖 card (NOT a `WordScene`; not in `PICKABLE_SCENES`), `?dino=1` deep-link. The
+  строго↔легче dial (`config.assist`) lowers the trigger toward легче — same "escape hatch
+  is the slider" principle as #18; there is no fail state to design around. The `check`/`game`
+  branches, matcher, and `stepPlay` stay untouched, so the all-rungs-off identity still holds.
+
 ## Testing
 
 - `npm test` (vitest) runs in plain Node — **no jsdom, no mic**. Keep logic pure
