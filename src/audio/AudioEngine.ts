@@ -110,6 +110,13 @@ const FAST_ENV_RELEASE_MS = 18;
  * enough to hold a vowel, a 50–150 ms closure, and the burst together. */
 const FAST_ENV_HIST_FRAMES = 20;
 
+/** dB floor a captured spectrum bin is clamped to (issue #24). An empty FFT bin
+ * reads back as `-Infinity` dB, which is not JSON-representable; `-140` dB is
+ * effectively silent (`10^(-140/20)` ≈ 1e-7 magnitude) so the clamp is lossless
+ * for detection. Kept next to the analyser constants, consumed by
+ * {@link AudioEngine.captureRawFrame}. */
+const CAPTURE_DB_FLOOR = -140;
+
 export class AudioEngine {
   status: MicStatus = "idle";
   errorMessage = "";
@@ -486,6 +493,49 @@ export class AudioEngine {
       f2: 0,
       stopBurst: false,
     };
+  }
+
+  // ---- offline-capture accessors (issue #24) ------------------------------
+  // Additive, read-only, and OFF the play hot path — used only by the detection-
+  // test screen's "запись" control to snapshot real frames for reproducible,
+  // offline threshold tuning. Nothing here changes what `sample()` computes.
+
+  /** Sample rate the analyser runs at (needed to replay a captured clip through
+   * the same frequency→bin mapping). */
+  getSampleRate(): number {
+    return this.sampleRate;
+  }
+
+  /** Length of the raw time-domain buffer this engine samples (analyser.fftSize). */
+  getFrameSize(): number {
+    return this.buf.length;
+  }
+
+  /** Number of spectrum bins (analyser.frequencyBinCount). */
+  getBinCount(): number {
+    return this.freqDb.length;
+  }
+
+  /**
+   * Copy the CURRENT frame's raw buffers into fresh arrays for the offline
+   * capture path (#24): the time-domain samples (drive RMS / ZCR / the fast «т»
+   * envelope) and the dB magnitude spectrum exactly as the AnalyserNode handed
+   * it back (drives flatness / centroid / low-band / formants). Call right after
+   * `sample()`, only while recording on the detection-test screen — it allocates,
+   * so it must never touch the play hot path.
+   *
+   * `freqDb` is only refreshed by `sample()` when the phonetic layer is on; the
+   * test screen forces it on, so the spectrum is current there. Non-finite dB
+   * bins (an all-empty bin reads back as `-Infinity`) are floored to
+   * {@link CAPTURE_DB_FLOOR} so the captured clip is JSON-safe and round-trips to
+   * a real (near-zero) magnitude.
+   */
+  captureRawFrame(): { time: Float32Array; freqDb: Float32Array } {
+    const time = Float32Array.from(this.buf);
+    const freqDb = Float32Array.from(this.freqDb, (v) =>
+      Number.isFinite(v) ? v : CAPTURE_DB_FLOOR,
+    );
+    return { time, freqDb };
   }
 
   /** Stop the mic and release the device. */

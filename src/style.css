@@ -630,3 +630,40 @@ body {
   font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace;
   color: rgba(255, 255, 255, 0.6);
 }
+
+/* offline-capture controls (#24) */
+.test-record {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+.test-record-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.test-record-cap {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+}
+.test-clip-label {
+  flex: 1;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 14px;
+}
+.test-record-btn.recording {
+  color: #ff5c5c;
+  font-weight: 800;
+}
+.test-record-status {
+  margin: 0;
+  font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  color: rgba(255, 255, 255, 0.5);
+}

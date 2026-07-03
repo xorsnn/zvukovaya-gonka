@@ -19,6 +19,14 @@ import {
   type TestTarget,
   type Detected,
 } from "./game/SoundTest";
+import {
+  CLIP_VERSION,
+  COARSE_LABELS,
+  serializeClip,
+  type CoarseLabel,
+  type ClipFrame,
+  type DetectionClip,
+} from "./game/DetectionFixture";
 import { DEFAULT_WORD, PICKABLE_SCENES } from "./game/words";
 import { buildSceneMatcher } from "./game/round";
 import { resolveSceneParam, SCENE_PARAM } from "./game/navigation";
@@ -123,6 +131,14 @@ app.innerHTML = `
         <p class="test-confusion" id="testConfusion"></p>
         <button class="parent-link" id="testResetBtn">сбросить счёт</button>
       </div>
+      <div class="test-record">
+        <div class="test-record-row">
+          <span class="test-record-cap">запись:</span>
+          <select id="testClipLabel" class="test-clip-label" aria-label="Что записываем"></select>
+          <button class="parent-link test-record-btn" id="testRecordBtn">● запись</button>
+        </div>
+        <p class="test-record-status" id="testRecordStatus">локально, без загрузки — для офлайн-настройки</p>
+      </div>
     </div>
   </section>
 `;
@@ -167,6 +183,16 @@ const testReadout = el<HTMLElement>("#testReadout");
 const testTargetEl = el<HTMLElement>("#testTarget");
 const testScoreLine = el<HTMLElement>("#testScoreLine");
 const testConfusion = el<HTMLElement>("#testConfusion");
+// offline-capture refs (#24)
+const testClipLabel = el<HTMLSelectElement>("#testClipLabel");
+const testRecordBtn = el<HTMLButtonElement>("#testRecordBtn");
+const testRecordStatus = el<HTMLElement>("#testRecordStatus");
+for (const label of COARSE_LABELS) {
+  const opt = document.createElement("option");
+  opt.value = label;
+  opt.textContent = label;
+  testClipLabel.appendChild(opt);
+}
 
 // The four vowel bars are built once; renderSoundTest paints each fill per frame.
 const TEST_VOWELS: readonly Vowel[] = ["а", "о", "у", "и"];
@@ -427,7 +453,10 @@ function showScreen(name: Screen): void {
   // then restores config-driven flags on leave (AC#8). Order matters — force
   // AFTER a restore can't fire (we only restore when we WERE on test).
   if (name === "test") enterTestScreen();
-  else if (wasTest) applyEngineFlags();
+  else if (wasTest) {
+    cancelTestRecording(); // drop any in-progress recording on leave (#24)
+    applyEngineFlags();
+  }
   // Reflect the read-only chip: reset its smoother on any screen change and
   // show it only on the listening screens (AC#7). It holds no game state.
   letterIndicator.reset();
@@ -522,6 +551,11 @@ testResetBtn.addEventListener("click", () => {
   testTally.reset();
   testAccumulator.reset();
   renderTestTally();
+});
+// Offline capture (#24): toggle record; a second press stops + downloads.
+testRecordBtn.addEventListener("click", () => {
+  if (testRecording) finishTestRecording();
+  else startTestRecording();
 });
 
 // ---------- debug overlay (?debug=1 in the URL OR the «отладка» toggle) ----------
@@ -682,6 +716,20 @@ let tcF2: number[] = [];
 let tcCentroid: number[] = [];
 let tcElapsedMs = 0;
 
+// Offline-capture state (#24). Recording snapshots the raw per-frame buffers into
+// a clip the caregiver downloads and replays offline through the pure detectors
+// (see DetectionFixture.ts). It is LOCAL-ONLY and consent-explicit — nothing is
+// uploaded — and shares no state with the matcher (same read-only invariant).
+let testRecording = false;
+let testClipFrames: ClipFrame[] = [];
+let testRecordMs = 0;
+/** Hard cap on one recording (ms) so a forgotten record never grows unbounded. */
+const TEST_RECORD_MAX_MS = 8000;
+/** Round captured samples/dB to keep the downloaded JSON small (detection is
+ * unaffected at this precision — the detectors read coarse features). */
+const rTime = (x: number): number => Math.round(x * 1e5) / 1e5;
+const rDb = (x: number): number => Math.round(x * 10) / 10;
+
 /** Reset all screen-local state on entry + force the engine passes on (AC#8). */
 function enterTestScreen(): void {
   // Force the spectral + formant passes ON so every detector has data even with
@@ -699,8 +747,76 @@ function enterTestScreen(): void {
   testBurstAgoMs = Infinity;
   testGlyph.textContent = "—";
   testCalibHint.textContent = "нужна калибровка";
+  cancelTestRecording();
   renderTestTarget();
   renderTestTally();
+}
+
+// ---- offline capture (#24) ----
+/** Start recording raw frames into a fresh clip. */
+function startTestRecording(): void {
+  testRecording = true;
+  testClipFrames = [];
+  testRecordMs = 0;
+  testRecordBtn.textContent = "■ стоп";
+  testRecordBtn.classList.add("recording");
+}
+
+/** Stop recording without downloading (screen leave / reset). */
+function cancelTestRecording(): void {
+  testRecording = false;
+  testClipFrames = [];
+  testRecordMs = 0;
+  testRecordBtn.textContent = "● запись";
+  testRecordBtn.classList.remove("recording");
+  testRecordStatus.textContent = "локально, без загрузки — для офлайн-настройки";
+}
+
+/** Stop recording and offer the captured clip as a local JSON download. */
+function finishTestRecording(): void {
+  testRecording = false;
+  testRecordBtn.textContent = "● запись";
+  testRecordBtn.classList.remove("recording");
+  const frames = testClipFrames;
+  testClipFrames = [];
+  if (frames.length === 0) {
+    testRecordStatus.textContent = "нет кадров";
+    return;
+  }
+  const label = testClipLabel.value as CoarseLabel;
+  const clip: DetectionClip = {
+    version: CLIP_VERSION,
+    label,
+    sampleRate: audio.getSampleRate(),
+    fftSize: audio.getFrameSize(),
+    binCount: audio.getBinCount(),
+    assist: config.assist,
+    baseline: testBaseline,
+    frames,
+  };
+  downloadClip(clip);
+  testRecordStatus.textContent = `готово: ${frames.length} кадров → ${clipFilename(label)}`;
+}
+
+/** Timestamped, date-upfront download name so a folder of captures sorts by time. */
+function clipFilename(label: CoarseLabel): string {
+  const d = new Date();
+  const p = (n: number): string => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(
+    d.getHours(),
+  )}${p(d.getMinutes())}`;
+  return `${stamp}_${label}.json`;
+}
+
+/** Trigger a browser download of the clip JSON (no upload; revoked after click). */
+function downloadClip(clip: DetectionClip): void {
+  const blob = new Blob([serializeClip(clip)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = clipFilename(clip.label);
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /** Begin sampling a fresh screen-local baseline from a held «ААА». */
@@ -838,6 +954,27 @@ function renderSoundTest(frame: AudioFrame, dtMs: number): void {
       renderTestTally();
     }
   }
+
+  // 6) offline capture (#24): while recording, snapshot the raw buffers into the
+  // clip. Off the play hot path (test screen only); auto-stops at the cap.
+  if (testRecording) captureTestFrame(dtMs);
+}
+
+/** Push one raw frame onto the recording, updating the status; auto-stop + download
+ * at {@link TEST_RECORD_MAX_MS}. Reads the engine buffers filled by this frame's
+ * `sample()` (already called at the top of the loop), so it needs no frame arg. */
+function captureTestFrame(dtMs: number): void {
+  const { time, freqDb } = audio.captureRawFrame();
+  testClipFrames.push({
+    dtMs,
+    time: Array.from(time, rTime),
+    freq: Array.from(freqDb, rDb),
+  });
+  testRecordMs += dtMs;
+  testRecordStatus.textContent =
+    `● запись ${(testRecordMs / 1000).toFixed(1)}с · ${testClipFrames.length} кадров ` +
+    `(${testClipLabel.value})`;
+  if (testRecordMs >= TEST_RECORD_MAX_MS) finishTestRecording();
 }
 
 // ---------- master loop ----------

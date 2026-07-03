@@ -215,6 +215,11 @@ Mic ─ getUserMedia ─ AnalyserNode ─► AudioEngine.sample() ─► AudioFr
   gated-core rule for a vowel / the `stopBurst`-in-window rule for Т), and a
   `ScoreTally` (hits + confusion). DOM-free and deterministic — no `Date.now()` /
   `Math.random()` — so the whole verdict + tally is unit-tested in plain Node.
+- **`src/game/DetectionFixture.ts`** — the offline capture/replay harness (#24):
+  the `DetectionClip` schema + loader, a `ClipAnalyser` that plays a captured clip
+  back into the real `AudioEngine`, `replayClip` / `clipVerdict` (the coarse
+  outcome), `scoreClip` (the full on-screen scoring pipeline), and `sweepAssist`.
+  Pure and DOM-free, so a committed clip is a Node regression test.
 - **`src/game/sfx.ts`** — synthesized celebration sounds + best-effort Russian
   TTS to model the target word. Sound only plays _after_ the pounce, never
   during the chase (with echo cancellation off, speaker audio would otherwise
@@ -300,6 +305,37 @@ and additive, so the AC#1/AC#5 identities still hold). It has two parts:
   threshold; the actual retuning is the #11/#12 follow-up (still done on a real
   mic, with the child — not by unit tests alone).
 
+### Offline detection fixtures (dev/caregiver, #24)
+
+The detection-test screen also has a **«запись»** control that turns live tuning
+into *reproducible* tuning. Pick a coarse class (`kot` / `hiss` / `bare-a` / …),
+record a few seconds, and it downloads a **`DetectionClip` JSON** of the raw
+per-frame buffers — **local-only, with consent, nothing uploaded**. The label is a
+content class you already produced, never a transcript, so this stays inside the
+core rule: it scores the *existing* feature detectors, it trains nothing.
+
+Replay is offline and exact. `src/game/DetectionFixture.ts` runs a clip through the
+**real `AudioEngine`** (fed by a `ClipAnalyser` that plays the buffers back), so the
+adaptive noise floor, the self-scaling `level`, the fast «т» envelope and the voiced
+hysteresis are reproduced — not re-implemented — and the scorer reuses the screen's
+own `LetterIndicator` / `BurstAccumulator` / `burstVerdict`, so the offline verdict
+*is* the on-screen verdict. Drop a captured clip into `tests/fixtures/` and:
+
+```bash
+npm test                 # tests/detection-fixtures.test.ts replays every clip:
+                         #   coarse outcome (silence/vowel/hiss/stop) must match
+                         #   its label; кот fires «Т»; no non-stop clip false-fires;
+                         #   prints the bare-vowel confusion + the assist sweep
+npm run gen-fixtures     # regenerate the committed SYNTHETIC seed clips (LCG,
+                         #   deterministic) — real captures replace them in place
+```
+
+`sweepAssist` grids the shipped **строго↔легче** assist (already parameterised into
+the «т» bounds via `burstOptsForAssist`) and reports the hit rate + «т» false-alarm
+rate per setting — the reproducible measurement for the #11 / pitch-HNR /
+spectral-«т» / LPC-formant follow-ups. This increment delivers the *ability* to
+sweep; it changes no threshold (those are still tuned live, with the child).
+
 ## Tests
 
 ```bash
@@ -307,6 +343,7 @@ npm test           # vitest: pure DSP (incl. the `detectStopBurst` shape test),
                    # the PatternMatcher state machine, the GameView tug-of-war
                    # drive, an AudioEngine→matcher integration via an injected
                    # analyser, the SoundTest burst/verdict/tally logic (#22),
+                   # the DetectionFixture replay + fixture regressions (#24),
                    # plus the AC#1 (easy = byte-for-byte) and AC#5 (kill-switch
                    # identity) guards
 ```
